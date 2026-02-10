@@ -1,6 +1,7 @@
 [package]
 name = "soul-core"
-version = "0.7.0"
+version = "0.7.1"
+authors = ["team@amai.net"]
 edition = "2021"
 description = "Async agentic runtime for Rust — steerable agent loops, context management, multi-provider LLM abstraction, virtual filesystem, WASM-ready"
 license = "MIT"
