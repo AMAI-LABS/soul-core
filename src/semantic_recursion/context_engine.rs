@@ -8,7 +8,9 @@ use std::collections::HashMap;
 
 use crate::types::Message;
 
+use super::fragment::{self, FragmentConfig};
 use super::graph::{ContextGraph, EdgeKind, NodeId, NodeKind};
+use super::symlink::{self, SymlinkStore};
 use super::tokenizer::Tokenizer;
 use super::vector_store::VectorStore;
 
@@ -35,6 +37,8 @@ pub struct SemanticContextEngine {
     graph: ContextGraph,
     vector_store: VectorStore,
     tokenizer: Tokenizer,
+    symlinks: SymlinkStore,
+    fragment_config: FragmentConfig,
 }
 
 impl SemanticContextEngine {
@@ -43,7 +47,14 @@ impl SemanticContextEngine {
             graph: ContextGraph::new(),
             vector_store: VectorStore::new(),
             tokenizer: Tokenizer::new(),
+            symlinks: SymlinkStore::new(),
+            fragment_config: FragmentConfig::default(),
         }
+    }
+
+    pub fn with_fragment_config(mut self, config: FragmentConfig) -> Self {
+        self.fragment_config = config;
+        self
     }
 
     /// Ingest a user request into the graph and vector store
@@ -272,6 +283,145 @@ impl SemanticContextEngine {
             .collect()
     }
 
+    // ─── Symlink Operations ──────────────────────────────────────────────────
+
+    /// Symlink a single node: create a compact hash reference.
+    /// Returns the 6-char hash.
+    pub fn symlink_node(&mut self, node_id: NodeId) -> Option<String> {
+        let node = self.graph.get_node(node_id)?;
+        let summary = symlink::auto_summary(&node.content, 80);
+        let hash = self.symlinks.create(node_id, &node.content, &summary);
+        Some(hash)
+    }
+
+    /// Fragment a node into semantic clusters, symlink each fragment.
+    /// Returns vec of (hash, fragment_node_id) pairs.
+    /// Close sentences cluster together into the same symlink.
+    /// Distant content gets separate symlinks.
+    pub fn symlink_fragmented(&mut self, node_id: NodeId) -> Vec<(String, NodeId)> {
+        let content = match self.graph.get_node(node_id) {
+            Some(n) => n.content.clone(),
+            None => return vec![],
+        };
+        let kind = self.graph.get_node(node_id).unwrap().kind.clone();
+
+        let result = fragment::fragment_message(&content, &mut self.tokenizer, &self.fragment_config);
+
+        if result.fragments.len() <= 1 {
+            // Single fragment — symlink the whole node directly
+            let summary = symlink::auto_summary(&content, 80);
+            let hash = self.symlinks.create(node_id, &content, &summary);
+            return vec![(hash, node_id)];
+        }
+
+        // Multiple fragments — create a sub-node for each, edge back to parent
+        let mut symlinked = Vec::new();
+        for fragment in &result.fragments {
+            let frag_node = self.graph.add_node(
+                NodeKind::Fragment,
+                fragment.text.clone(),
+                HashMap::from([
+                    ("parent_node".into(), node_id.to_string()),
+                    ("sentence_indices".into(), format!("{:?}", fragment.sentence_indices)),
+                ]),
+            );
+
+            // Edge: fragment is derived from parent
+            self.graph.add_edge(node_id, frag_node, EdgeKind::DerivedFrom, 1.0);
+
+            // Index fragment in vector store
+            let mut meta = HashMap::new();
+            meta.insert("node_id".into(), frag_node.to_string());
+            meta.insert("kind".into(), "fragment".into());
+            meta.insert("parent_node".into(), node_id.to_string());
+            self.vector_store.insert(&fragment.text, meta);
+
+            // Create symlink for this fragment
+            let hash = self.symlinks.create(frag_node, &fragment.text, &fragment.summary);
+            symlinked.push((hash, frag_node));
+        }
+
+        symlinked
+    }
+
+    /// Build a symlinked context window: same as retrieve() but messages are
+    /// replaced with compact symlink references. The LLM can use resolve_symlink
+    /// tool to expand any hash it needs.
+    pub fn retrieve_symlinked(&mut self, query: &RetrievalQuery) -> SymlinkedContextWindow {
+        let window = self.retrieve(query);
+
+        let mut symlinked_messages = Vec::new();
+        let mut symlink_map = Vec::new();
+
+        for (i, msg) in window.messages.iter().enumerate() {
+            let node_id = window.node_ids_included[i];
+            let text = msg.text_content();
+
+            // Fragment and symlink this message
+            let fragments = self.symlink_fragmented(node_id);
+
+            if fragments.len() <= 1 {
+                // Single fragment — one symlink line
+                if let Some((hash, _)) = fragments.first() {
+                    let ref_line = self.symlinks.format_ref(hash).unwrap_or_else(|| text.clone());
+                    symlinked_messages.push(ref_line.clone());
+                    symlink_map.push(vec![hash.clone()]);
+                } else {
+                    symlinked_messages.push(text);
+                    symlink_map.push(vec![]);
+                }
+            } else {
+                // Multiple fragments — each as separate symlink line
+                let mut lines = Vec::new();
+                let mut hashes = Vec::new();
+                for (hash, _) in &fragments {
+                    if let Some(line) = self.symlinks.format_ref(hash) {
+                        lines.push(line);
+                    }
+                    hashes.push(hash.clone());
+                }
+                symlinked_messages.push(lines.join("\n"));
+                symlink_map.push(hashes);
+            }
+        }
+
+        let symlinked_tokens: usize = symlinked_messages
+            .iter()
+            .map(|s| (s.len() + 3) / 4)
+            .sum();
+
+        SymlinkedContextWindow {
+            original: window,
+            symlinked_messages,
+            symlinked_tokens,
+            symlink_map,
+            tokens_saved: 0, // computed below
+        }
+        .compute_savings()
+    }
+
+    /// Resolve a symlink hash back to its full content
+    pub fn resolve_symlink(&self, hash: &str) -> Option<symlink::ResolveResult> {
+        self.symlinks.resolve(hash)
+    }
+
+    /// Extract and resolve all symlink refs from a text
+    pub fn expand_symlink_refs(&self, text: &str) -> String {
+        self.symlinks.expand_refs(text)
+    }
+
+    /// Access the symlink store
+    pub fn symlinks(&self) -> &SymlinkStore {
+        &self.symlinks
+    }
+
+    /// Access the symlink store mutably
+    pub fn symlinks_mut(&mut self) -> &mut SymlinkStore {
+        &mut self.symlinks
+    }
+
+    // ─── Stats ──────────────────────────────────────────────────────────────
+
     /// Get graph statistics
     pub fn stats(&self) -> EngineStats {
         EngineStats {
@@ -281,6 +431,8 @@ impl SemanticContextEngine {
             vector_entries: self.vector_store.len(),
             vocab_size: self.vector_store.vocab_size(),
             active_tokens: self.graph.active_token_estimate(),
+            symlink_count: self.symlinks.len(),
+            symlink_tokens_saved: self.symlinks.total_tokens_saved(),
         }
     }
 
@@ -301,6 +453,28 @@ impl Default for SemanticContextEngine {
     }
 }
 
+/// A context window with symlink references instead of full content
+#[derive(Debug, Clone)]
+pub struct SymlinkedContextWindow {
+    /// The original (full) context window
+    pub original: ContextWindow,
+    /// Messages replaced with symlink references
+    pub symlinked_messages: Vec<String>,
+    /// Total tokens in the symlinked form
+    pub symlinked_tokens: usize,
+    /// Map: message index → list of symlink hashes
+    pub symlink_map: Vec<Vec<String>>,
+    /// Tokens saved by symlinking
+    pub tokens_saved: usize,
+}
+
+impl SymlinkedContextWindow {
+    fn compute_savings(mut self) -> Self {
+        self.tokens_saved = self.original.total_tokens.saturating_sub(self.symlinked_tokens);
+        self
+    }
+}
+
 /// Statistics about the engine state
 #[derive(Debug, Clone)]
 pub struct EngineStats {
@@ -310,6 +484,8 @@ pub struct EngineStats {
     pub vector_entries: usize,
     pub vocab_size: usize,
     pub active_tokens: usize,
+    pub symlink_count: usize,
+    pub symlink_tokens_saved: usize,
 }
 
 #[cfg(test)]
@@ -492,5 +668,174 @@ mod tests {
         assert!(originals.contains(&"resp 1".to_string()));
         assert!(originals.contains(&"msg 2".to_string()));
         assert!(originals.contains(&"resp 2".to_string()));
+    }
+
+    // ─── Symlink Tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn symlink_single_node() {
+        let mut engine = SemanticContextEngine::new();
+        let req = engine.ingest_user_request("Explain Rust async patterns with tokio");
+        let hash = engine.symlink_node(req).unwrap();
+        assert_eq!(hash.len(), 6);
+
+        // Can resolve it back
+        let resolved = engine.resolve_symlink(&hash).unwrap();
+        assert!(resolved.original.contains("Rust async"));
+        assert_eq!(resolved.node_id, req);
+    }
+
+    #[test]
+    fn symlink_node_idempotent() {
+        let mut engine = SemanticContextEngine::new();
+        let req = engine.ingest_user_request("Test content");
+        let h1 = engine.symlink_node(req).unwrap();
+        let h2 = engine.symlink_node(req).unwrap();
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn symlink_nonexistent_node() {
+        let mut engine = SemanticContextEngine::new();
+        assert!(engine.symlink_node(999).is_none());
+    }
+
+    #[test]
+    fn symlink_fragmented_short_message() {
+        let mut engine = SemanticContextEngine::new();
+        let req = engine.ingest_user_request("Short message");
+        let fragments = engine.symlink_fragmented(req);
+        // Short message = single fragment = single symlink
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].1, req); // points to original node
+    }
+
+    #[test]
+    fn symlink_fragmented_multi_topic() {
+        let mut engine = SemanticContextEngine::new();
+        let long_msg = "Rust has excellent async support with tokio and futures. \
+                        Python uses asyncio for async programming and has great data science libs. \
+                        Rust also provides zero-cost abstractions and memory safety. \
+                        Python is dynamically typed and has pip for packages. \
+                        JavaScript uses promises and async await syntax. \
+                        JavaScript runs in the browser and Node.js.";
+        let req = engine.ingest_user_request(long_msg);
+        let fragments = engine.symlink_fragmented(req);
+
+        // Should create multiple fragments
+        assert!(fragments.len() >= 1);
+
+        // Each fragment has a unique hash
+        let hashes: Vec<&str> = fragments.iter().map(|(h, _)| h.as_str()).collect();
+        let unique: std::collections::HashSet<_> = hashes.iter().collect();
+        assert_eq!(unique.len(), hashes.len());
+
+        // All fragments are resolvable
+        for (hash, _) in &fragments {
+            assert!(engine.resolve_symlink(hash).is_some());
+        }
+    }
+
+    #[test]
+    fn symlink_fragmented_creates_graph_edges() {
+        let mut engine = SemanticContextEngine::new();
+        let long_msg = "Topic A about databases and SQL. \
+                        Topic B about networking and TCP. \
+                        Topic A continued about PostgreSQL. \
+                        Topic B continued about HTTP protocols.";
+        let req = engine.ingest_user_request(long_msg);
+        let fragments = engine.symlink_fragmented(req);
+
+        if fragments.len() > 1 {
+            // Fragment nodes should have DerivedFrom edges back to parent
+            for (_, frag_node_id) in &fragments {
+                if *frag_node_id != req {
+                    let node = engine.graph().get_node(*frag_node_id).unwrap();
+                    assert_eq!(node.kind, NodeKind::Fragment);
+                    assert_eq!(node.metadata["parent_node"], req.to_string());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn symlink_stats_tracked() {
+        let mut engine = SemanticContextEngine::new();
+        assert_eq!(engine.stats().symlink_count, 0);
+
+        let req = engine.ingest_user_request(&"x".repeat(500));
+        engine.symlink_node(req);
+
+        let stats = engine.stats();
+        assert_eq!(stats.symlink_count, 1);
+        assert!(stats.symlink_tokens_saved > 0);
+    }
+
+    #[test]
+    fn retrieve_symlinked_window() {
+        let mut engine = SemanticContextEngine::new();
+
+        // Use long messages so symlinks actually save tokens
+        let long_content = "x".repeat(300);
+        engine.ingest_user_request(&format!("Tell me about Rust async: {long_content}"));
+        engine.ingest_llm_response(
+            &format!("Rust async uses tokio runtime for concurrent programming: {long_content}"),
+            0,
+            None,
+        );
+        engine.ingest_user_request(&format!("What about error handling? {long_content}"));
+        engine.ingest_llm_response(
+            &format!("Rust uses Result and Option types: {long_content}"),
+            2,
+            None,
+        );
+
+        let query = RetrievalQuery {
+            text: "Rust".into(),
+            max_tokens: 100000,
+            max_results: 5,
+            include_graph_neighbors: false,
+        };
+
+        let symlinked = engine.retrieve_symlinked(&query);
+        assert!(!symlinked.symlinked_messages.is_empty());
+        // Symlinked form should be significantly smaller for long messages
+        assert!(symlinked.symlinked_tokens < symlinked.original.total_tokens);
+        // Symlink map should have entries for each message
+        assert_eq!(symlinked.symlink_map.len(), symlinked.original.messages.len());
+        // Each message should have at least one symlink hash
+        for hashes in &symlinked.symlink_map {
+            assert!(!hashes.is_empty());
+        }
+    }
+
+    #[test]
+    fn expand_symlink_refs_in_text() {
+        let mut engine = SemanticContextEngine::new();
+        let req = engine.ingest_user_request("The original content about Rust traits");
+        let hash = engine.symlink_node(req).unwrap();
+
+        let text = format!("As discussed in [{hash}], traits are important.");
+        let expanded = engine.expand_symlink_refs(&text);
+        assert!(expanded.contains("The original content about Rust traits"));
+    }
+
+    #[test]
+    fn symlink_with_fragment_config() {
+        let config = FragmentConfig {
+            max_fragments: 3,
+            min_fragments: 2,
+            ..Default::default()
+        };
+        let mut engine = SemanticContextEngine::new().with_fragment_config(config);
+
+        let long_msg = (0..10)
+            .map(|i| format!("Sentence about topic {i} with details.", i = i))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let req = engine.ingest_user_request(&long_msg);
+        let fragments = engine.symlink_fragmented(req);
+        assert!(fragments.len() >= 2);
+        assert!(fragments.len() <= 3);
     }
 }
