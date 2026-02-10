@@ -1,12 +1,14 @@
 //! MCP transport layer — abstracts communication with MCP servers.
 
+#[cfg(test)]
 use async_trait::async_trait;
 
 use super::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use crate::error::SoulResult;
 
 /// Transport trait for sending JSON-RPC messages to an MCP server.
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait McpTransport: Send + Sync {
     /// Send a request and wait for a response.
     async fn send(&self, request: JsonRpcRequest) -> SoulResult<JsonRpcResponse>;

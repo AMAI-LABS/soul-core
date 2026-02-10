@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use crate::error::SoulResult;
@@ -44,7 +43,8 @@ impl McpToolBridge {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Tool for McpToolBridge {
     fn name(&self) -> &str {
         // We need to return a &str, but the prefixed name is computed.

@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 
 use super::SkillDefinition;
 use crate::error::{SoulError, SoulResult};
@@ -10,7 +9,8 @@ use crate::tool::ToolOutput;
 use crate::vexec::VirtualExecutor;
 
 /// Trait for executing skills.
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait SkillExecutor: Send + Sync {
     async fn execute(
         &self,
@@ -72,7 +72,8 @@ impl ShellSkillExecutor {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl SkillExecutor for ShellSkillExecutor {
     async fn execute(
         &self,

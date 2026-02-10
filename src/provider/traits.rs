@@ -1,11 +1,11 @@
-use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::error::SoulResult;
 use crate::types::*;
 
 /// Core provider trait — abstracts LLM API communication
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Provider: Send + Sync {
     /// Get provider kind
     fn kind(&self) -> ProviderKind;

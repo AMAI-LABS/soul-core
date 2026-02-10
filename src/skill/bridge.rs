@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
 use async_trait::async_trait;
 
 use crate::error::SoulResult;
@@ -23,7 +24,8 @@ impl SkillToolBridge {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Tool for SkillToolBridge {
     fn name(&self) -> &str {
         &self.skill.name

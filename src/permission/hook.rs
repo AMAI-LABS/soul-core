@@ -2,7 +2,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 
 use crate::error::SoulResult;
 use crate::hook::{BeforeToolCallContext, HookAction, ModifyingHook};
@@ -70,7 +69,8 @@ impl PermissionHook {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl ModifyingHook for PermissionHook {
     fn name(&self) -> &str {
         "permission"

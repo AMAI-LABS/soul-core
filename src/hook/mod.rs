@@ -1,3 +1,4 @@
+#[cfg(test)]
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -32,7 +33,8 @@ pub enum HookAction<T> {
 }
 
 /// Hook trait for modifying hooks (sequential, can alter state)
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait ModifyingHook: Send + Sync {
     fn name(&self) -> &str;
 
@@ -54,7 +56,8 @@ pub trait ModifyingHook: Send + Sync {
 }
 
 /// Hook trait for void hooks (parallel, fire-and-forget)
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait VoidHook: Send + Sync {
     fn name(&self) -> &str;
 
@@ -136,39 +139,57 @@ impl HookPipeline {
         Ok(HookAction::Continue(ctx))
     }
 
-    /// Run void hooks in parallel (fire-and-forget)
+    /// Run void hooks in parallel (fire-and-forget on native, sequential on WASM)
     pub async fn fire_agent_end(&self, messages: &[Message]) {
-        let futures: Vec<_> = self
-            .void_hooks
-            .iter()
-            .map(|h| {
-                let hook = h.clone();
-                let msgs = messages.to_vec();
-                tokio::spawn(async move {
-                    hook.on_agent_end(&msgs).await;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let futures: Vec<_> = self
+                .void_hooks
+                .iter()
+                .map(|h| {
+                    let hook = h.clone();
+                    let msgs = messages.to_vec();
+                    tokio::spawn(async move {
+                        hook.on_agent_end(&msgs).await;
+                    })
                 })
-            })
-            .collect();
-        for f in futures {
-            let _ = f.await;
+                .collect();
+            for f in futures {
+                let _ = f.await;
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for hook in &self.void_hooks {
+                hook.on_agent_end(messages).await;
+            }
         }
     }
 
-    /// Run void hooks for errors
+    /// Run void hooks for errors (parallel on native, sequential on WASM)
     pub async fn fire_error(&self, error: &str) {
-        let futures: Vec<_> = self
-            .void_hooks
-            .iter()
-            .map(|h| {
-                let hook = h.clone();
-                let err = error.to_string();
-                tokio::spawn(async move {
-                    hook.on_error(&err).await;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let futures: Vec<_> = self
+                .void_hooks
+                .iter()
+                .map(|h| {
+                    let hook = h.clone();
+                    let err = error.to_string();
+                    tokio::spawn(async move {
+                        hook.on_error(&err).await;
+                    })
                 })
-            })
-            .collect();
-        for f in futures {
-            let _ = f.await;
+                .collect();
+            for f in futures {
+                let _ = f.await;
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            for hook in &self.void_hooks {
+                hook.on_error(error).await;
+            }
         }
     }
 

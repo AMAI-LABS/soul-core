@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -238,7 +237,8 @@ impl Default for AnthropicProvider {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider for AnthropicProvider {
     fn kind(&self) -> ProviderKind {
         ProviderKind::Anthropic

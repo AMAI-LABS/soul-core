@@ -17,6 +17,7 @@ pub mod shell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(test)]
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
@@ -25,7 +26,8 @@ use crate::tool::ToolOutput;
 use crate::types::ToolDefinition;
 
 /// Trait for executing tools via different backends.
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait ToolExecutor: Send + Sync {
     /// Execute a tool call.
     async fn execute(

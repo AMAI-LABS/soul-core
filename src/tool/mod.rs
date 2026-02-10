@@ -1,3 +1,4 @@
+#[cfg(test)]
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
@@ -5,7 +6,8 @@ use crate::error::SoulResult;
 use crate::types::ToolDefinition;
 
 /// A tool that can be executed by the agent
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Tool: Send + Sync {
     /// Tool name (must match the definition name)
     fn name(&self) -> &str;
