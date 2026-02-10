@@ -216,6 +216,7 @@ mod tests {
         assert!(spawner.get_provider(&ProviderKind::Anthropic).is_none());
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn subagent_spawner_add_provider() {
         use crate::provider::AnthropicProvider;

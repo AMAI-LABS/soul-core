@@ -52,6 +52,7 @@ let messages = agent.run(options, event_tx, steering_rx).await?;
 | `memory` | Hierarchical memory (MEMORY.md + topic files, bootstrap files) |
 | `vfs` | Virtual filesystem: MemoryFs (WASM/tests), NativeFs (OS) |
 | `vexec` | Virtual executor: MockExecutor (WASM/tests), NativeExecutor (OS) |
+| `planner` | Task graph with dependencies, status tracking, timing, and display rendering |
 | `soullog` | Multi-sink structured logging |
 | `subagent` | Subagent spawner for parallel task delegation |
 | `semantic_recursion` | Context graph, TF-IDF search, symlinks, semantic fragmentation |

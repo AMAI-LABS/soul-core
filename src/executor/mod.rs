@@ -8,6 +8,7 @@
 //! - `LlmExecutor` — delegates to an LLM
 
 pub mod direct;
+#[cfg(feature = "native")]
 pub mod http;
 pub mod llm;
 pub mod mcp;

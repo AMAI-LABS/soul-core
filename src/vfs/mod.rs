@@ -86,7 +86,7 @@ pub trait VirtualFs: Send + Sync {
 // ─── MemoryFs ──────────────────────────────────────────────────────────────
 
 mod memory;
-pub use memory::MemoryFs;
+pub use memory::{MemoryFs, MemoryFsSnapshot};
 
 // ─── NativeFs (behind `native` feature, default) ──────────────────────────
 

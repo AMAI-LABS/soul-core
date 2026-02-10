@@ -47,6 +47,7 @@
 //! | [`subagent`] | Subagent spawner for parallel task delegation |
 //! | [`memory`] | Hierarchical memory (MEMORY.md + topic files, bootstrap files) |
 //! | [`error`] | Error types with thiserror: Provider, RateLimited, Auth, ContextOverflow, etc. |
+//! | [`planner`] | Task graph with dependencies, status tracking, timing, and display rendering |
 //! | [`rlm`] | Recursive Language Model engine — custom DSL for document search (arxiv 2512.24601) |
 //! | [`semantic_recursion`] | Context social graph, TF-IDF vector search, symlinks, semantic fragmentation |
 //!
@@ -76,6 +77,7 @@ pub mod hook;
 pub mod mcp;
 pub mod memory;
 pub mod permission;
+pub mod planner;
 pub mod provider;
 pub mod rlm;
 pub mod semantic_recursion;
