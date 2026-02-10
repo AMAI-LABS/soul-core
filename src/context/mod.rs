@@ -74,16 +74,12 @@ impl ContextManager {
     /// Check if context would overflow
     pub fn would_overflow(&self, messages: &[Message], system_tokens: usize) -> bool {
         let total = Self::estimate_tokens(messages) + system_tokens;
-        let effective_max =
-            (self.config.max_tokens as f64 / self.config.safety_margin) as usize;
+        let effective_max = (self.config.max_tokens as f64 / self.config.safety_margin) as usize;
         total > effective_max
     }
 
     /// Perform reversible offloading — replace large tool results with references
-    pub fn offload_tool_results(
-        messages: &mut [Message],
-        preserve_last_n: usize,
-    ) -> usize {
+    pub fn offload_tool_results(messages: &mut [Message], preserve_last_n: usize) -> usize {
         let len = messages.len();
         let offload_end = len.saturating_sub(preserve_last_n);
         let mut offloaded = 0;
@@ -97,10 +93,7 @@ impl ContextManager {
                     {
                         if !*is_error && content.len() > 200 {
                             let preview = &content[..100.min(content.len())];
-                            *content = format!(
-                                "[Offloaded: {} chars] {preview}...",
-                                content.len()
-                            );
+                            *content = format!("[Offloaded: {} chars] {preview}...", content.len());
                             offloaded += 1;
                         }
                     }
@@ -134,11 +127,7 @@ impl ContextManager {
 
         // If we're still under target, add more from the end
         if tokens < target_tokens && len > min_preserve {
-            let remaining: Vec<&Message> = messages
-                .iter()
-                .rev()
-                .skip(min_preserve)
-                .collect();
+            let remaining: Vec<&Message> = messages.iter().rev().skip(min_preserve).collect();
 
             for msg in remaining {
                 let msg_tokens = msg.estimate_tokens();
@@ -174,25 +163,20 @@ impl ContextManager {
         let offloaded = Self::offload_tool_results(messages, self.config.min_preserved_messages);
 
         let tokens_after_offload = Self::estimate_tokens(messages) + system_tokens;
-        let threshold =
-            (self.config.max_tokens as f64 * self.config.compaction_threshold) as usize;
+        let threshold = (self.config.max_tokens as f64 * self.config.compaction_threshold) as usize;
 
         let strategy = if tokens_after_offload <= threshold {
             CompactionStrategy::ReversibleOffload
         } else {
             // Strategy 2: Prune old messages
             let target = threshold.saturating_sub(self.config.reserve_tokens_floor);
-            *messages = Self::prune_old_messages(
-                messages,
-                target,
-                self.config.min_preserved_messages,
-            );
+            *messages =
+                Self::prune_old_messages(messages, target, self.config.min_preserved_messages);
 
             // If structured state exists, inject it as a system-like message
             if let Some(state) = structured_state {
                 if !state.items.is_empty() {
-                    let state_json = serde_json::to_string_pretty(state)
-                        .unwrap_or_default();
+                    let state_json = serde_json::to_string_pretty(state).unwrap_or_default();
                     let state_msg = Message::user(format!(
                         "[Compaction recovery — structured state preserved]\n{state_json}"
                     ));

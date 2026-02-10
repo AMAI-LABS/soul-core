@@ -118,11 +118,9 @@ impl Tokenizer {
                 if start.is_none() {
                     start = Some(i);
                 }
-            } else {
-                if let Some(s) = start {
-                    words.push(&text[s..i]);
-                    start = None;
-                }
+            } else if let Some(s) = start {
+                words.push(&text[s..i]);
+                start = None;
             }
         }
         if let Some(s) = start {

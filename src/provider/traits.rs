@@ -31,7 +31,9 @@ pub trait Provider: Send + Sync {
         auth: &AuthProfile,
     ) -> SoulResult<Message> {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let result = self.stream(messages, system, tools, model, auth, tx).await?;
+        let result = self
+            .stream(messages, system, tools, model, auth, tx)
+            .await?;
         // Drain any remaining deltas
         while rx.try_recv().is_ok() {}
         Ok(result)
@@ -48,11 +50,7 @@ pub trait Provider: Send + Sync {
     ) -> SoulResult<usize>;
 
     /// Health check / quota probe (cheap call)
-    async fn probe(
-        &self,
-        model: &ModelInfo,
-        auth: &AuthProfile,
-    ) -> SoulResult<ProbeResult>;
+    async fn probe(&self, model: &ModelInfo, auth: &AuthProfile) -> SoulResult<ProbeResult>;
 }
 
 /// Result of a provider health probe

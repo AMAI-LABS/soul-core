@@ -9,7 +9,7 @@ use soul_core::context::{ContextConfig, ContextManager};
 use soul_core::error::SoulResult;
 use soul_core::hook::*;
 use soul_core::memory::MemoryStore;
-use soul_core::provider::{Provider, ProbeResult};
+use soul_core::provider::{ProbeResult, Provider};
 use soul_core::session::{Session, SessionStore};
 use soul_core::subagent::{SubagentRole, SubagentSpawner};
 use soul_core::tool::{Tool, ToolOutput, ToolRegistry};
@@ -53,9 +53,7 @@ impl Provider for MockProvider {
         let msg = responses.remove(0);
         for block in &msg.content {
             if let ContentBlock::Text { text } = block {
-                let _ = event_tx.send(StreamDelta::TextDelta {
-                    text: text.clone(),
-                });
+                let _ = event_tx.send(StreamDelta::TextDelta { text: text.clone() });
             }
         }
         Ok(msg)
@@ -72,11 +70,7 @@ impl Provider for MockProvider {
         Ok(ContextManager::estimate_tokens(messages))
     }
 
-    async fn probe(
-        &self,
-        _model: &ModelInfo,
-        _auth: &AuthProfile,
-    ) -> SoulResult<ProbeResult> {
+    async fn probe(&self, _model: &ModelInfo, _auth: &AuthProfile) -> SoulResult<ProbeResult> {
         Ok(ProbeResult {
             healthy: true,
             rate_limit_remaining: Some(1.0),
@@ -124,7 +118,9 @@ impl Tool for ReadFileTool {
             let _ = tx.send("Done.".into());
         }
 
-        Ok(ToolOutput::success(format!("Contents of {path}: hello world")))
+        Ok(ToolOutput::success(format!(
+            "Contents of {path}: hello world"
+        )))
     }
 }
 
@@ -157,8 +153,14 @@ impl Tool for WriteTool {
         arguments: serde_json::Value,
         _partial_tx: Option<mpsc::UnboundedSender<String>>,
     ) -> SoulResult<ToolOutput> {
-        let path = arguments.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-        let content = arguments.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let path = arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let content = arguments
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         Ok(ToolOutput::success(format!(
             "Wrote {} bytes to {path}",
             content.len()
@@ -227,12 +229,22 @@ async fn full_agent_loop_with_tools() {
     }
 
     // Must have agent start/end, turn start/end, tool execution
-    assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentStart { .. })));
-    assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
-    assert!(events.iter().any(|e| matches!(e, AgentEvent::TurnStart { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::AgentStart { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::TurnStart { .. })));
     assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolExecutionStart { tool_name, .. } if tool_name == "read_file")));
-    assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolExecutionEnd { .. })));
-    assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolExecutionUpdate { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolExecutionUpdate { .. })));
 }
 
 #[tokio::test]
@@ -243,7 +255,11 @@ async fn agent_loop_multi_tool_calls() {
             Role::Assistant,
             vec![
                 ContentBlock::tool_call("tc1", "read_file", json!({"path": "/a.txt"})),
-                ContentBlock::tool_call("tc2", "write_file", json!({"path": "/b.txt", "content": "new"})),
+                ContentBlock::tool_call(
+                    "tc2",
+                    "write_file",
+                    json!({"path": "/b.txt", "content": "new"}),
+                ),
             ],
         ),
         // Turn 2: final
@@ -277,7 +293,11 @@ async fn agent_with_hooks() {
     let responses = vec![
         Message::new(
             Role::Assistant,
-            vec![ContentBlock::tool_call("tc1", "read_file", json!({"path": "/test"}))],
+            vec![ContentBlock::tool_call(
+                "tc1",
+                "read_file",
+                json!({"path": "/test"}),
+            )],
         ),
         Message::assistant("File read successfully"),
     ];
@@ -292,7 +312,9 @@ async fn agent_with_hooks() {
     struct SystemInjector;
     #[async_trait]
     impl ModifyingHook for SystemInjector {
-        fn name(&self) -> &str { "injector" }
+        fn name(&self) -> &str {
+            "injector"
+        }
         async fn before_agent_start(
             &self,
             mut ctx: BeforeAgentStartContext,
@@ -307,7 +329,9 @@ async fn agent_with_hooks() {
     }
     #[async_trait]
     impl VoidHook for LoggingVoidHook {
-        fn name(&self) -> &str { "logger" }
+        fn name(&self) -> &str {
+            "logger"
+        }
         async fn on_agent_end(&self, _messages: &[Message]) {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
         }
@@ -316,7 +340,9 @@ async fn agent_with_hooks() {
     let hook_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut hooks = HookPipeline::new();
     hooks.add_modifying(Arc::new(SystemInjector));
-    hooks.add_void(Arc::new(LoggingVoidHook { called: hook_called.clone() }));
+    hooks.add_void(Arc::new(LoggingVoidHook {
+        called: hook_called.clone(),
+    }));
 
     let mut agent = AgentLoop::new(provider, tools, config).with_hooks(hooks);
 
@@ -343,7 +369,11 @@ async fn session_persistence_roundtrip() {
     let msg2 = Message::assistant("hi there");
     let msg3 = Message::new(
         Role::Assistant,
-        vec![ContentBlock::tool_call("tc1", "read", json!({"path": "/x"}))],
+        vec![ContentBlock::tool_call(
+            "tc1",
+            "read",
+            json!({"path": "/x"}),
+        )],
     );
     let msg4 = Message::tool_result("tc1", "file contents", false);
 
@@ -379,9 +409,18 @@ async fn memory_hierarchy_integration() {
     let store = MemoryStore::new(dir.path());
 
     // Write memory
-    store.write_main("# Key Patterns\n\n- Use TDD\n- Axum 0.7 patterns\n").await.unwrap();
-    store.write_topic("debugging", "# Debug Notes\n\n- Check logs first\n").await.unwrap();
-    store.write_topic("architecture", "# Architecture\n\n- Microservices\n").await.unwrap();
+    store
+        .write_main("# Key Patterns\n\n- Use TDD\n- Axum 0.7 patterns\n")
+        .await
+        .unwrap();
+    store
+        .write_topic("debugging", "# Debug Notes\n\n- Check logs first\n")
+        .await
+        .unwrap();
+    store
+        .write_topic("architecture", "# Architecture\n\n- Microservices\n")
+        .await
+        .unwrap();
 
     // Build prompt section
     let section = store.build_prompt_section().await.unwrap();
@@ -421,7 +460,10 @@ async fn context_compaction_integration() {
     let mut messages: Vec<Message> = Vec::new();
     for i in 0..20 {
         messages.push(Message::user(format!("Question {i}: {}", "x".repeat(50))));
-        messages.push(Message::assistant(format!("Answer {i}: {}", "y".repeat(50))));
+        messages.push(Message::assistant(format!(
+            "Answer {i}: {}",
+            "y".repeat(50)
+        )));
     }
     // Add some tool results
     for i in 0..5 {
@@ -440,9 +482,7 @@ async fn context_compaction_integration() {
     state.set_status(0, ItemStatus::InProgress);
     state.add("Write tests", Some("Writing tests".into()));
 
-    let result = mgr
-        .compact(&mut messages, Some(&state), 100)
-        .unwrap();
+    let result = mgr.compact(&mut messages, Some(&state), 100).unwrap();
 
     assert!(result.messages_after < result.messages_before);
     assert!(result.tokens_after < result.tokens_before);
@@ -539,7 +579,11 @@ async fn event_stream_completeness() {
     let responses = vec![
         Message::new(
             Role::Assistant,
-            vec![ContentBlock::tool_call("tc1", "read_file", json!({"path": "/x"}))],
+            vec![ContentBlock::tool_call(
+                "tc1",
+                "read_file",
+                json!({"path": "/x"}),
+            )],
         ),
         Message::assistant("Done"),
     ];
@@ -603,14 +647,18 @@ async fn hook_blocks_dangerous_tool() {
 
     #[async_trait]
     impl ModifyingHook for DangerBlocker {
-        fn name(&self) -> &str { "danger_blocker" }
+        fn name(&self) -> &str {
+            "danger_blocker"
+        }
         async fn before_tool_call(
             &self,
             ctx: BeforeToolCallContext,
         ) -> SoulResult<HookAction<BeforeToolCallContext>> {
             // Block write operations
             if ctx.tool_name == "write_file" {
-                return Ok(HookAction::Cancel("Write operations blocked by policy".into()));
+                return Ok(HookAction::Cancel(
+                    "Write operations blocked by policy".into(),
+                ));
             }
             Ok(HookAction::Continue(ctx))
         }
@@ -655,7 +703,10 @@ async fn hook_blocks_dangerous_tool() {
     // The tool result should be an error about blocking
     let blocked_msg = &result[1];
     assert_eq!(blocked_msg.role, Role::Tool);
-    if let ContentBlock::ToolResult { content, is_error, .. } = &blocked_msg.content[0] {
+    if let ContentBlock::ToolResult {
+        content, is_error, ..
+    } = &blocked_msg.content[0]
+    {
         assert!(content.contains("Blocked"));
         assert!(*is_error);
     }
@@ -665,7 +716,9 @@ async fn hook_blocks_dangerous_tool() {
 async fn persist_hook_transforms_results() {
     struct RedactHook;
     impl PersistHook for RedactHook {
-        fn name(&self) -> &str { "redact" }
+        fn name(&self) -> &str {
+            "redact"
+        }
         fn transform_tool_result(
             &self,
             _tool_name: &str,
@@ -680,7 +733,11 @@ async fn persist_hook_transforms_results() {
     let responses = vec![
         Message::new(
             Role::Assistant,
-            vec![ContentBlock::tool_call("tc1", "read_file", json!({"path": "/secrets"}))],
+            vec![ContentBlock::tool_call(
+                "tc1",
+                "read_file",
+                json!({"path": "/secrets"}),
+            )],
         ),
         Message::assistant("Got the secrets"),
     ];
@@ -691,7 +748,9 @@ async fn persist_hook_transforms_results() {
     struct SecretTool;
     #[async_trait]
     impl Tool for SecretTool {
-        fn name(&self) -> &str { "read_file" }
+        fn name(&self) -> &str {
+            "read_file"
+        }
         fn definition(&self) -> ToolDefinition {
             ToolDefinition {
                 name: "read_file".into(),

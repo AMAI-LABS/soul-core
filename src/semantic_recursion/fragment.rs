@@ -8,7 +8,7 @@
 //! 4. Each cluster becomes its own symlink with its own hash
 //!
 //! Result: a message like "Rust has great async. Python uses asyncio. Rust also has traits."
-//! becomes fragments: [A3F2B1]: Rust async+traits discussion, [B4C5D6]: Python asyncio mention
+//! becomes fragments: \[A3F2B1\]: Rust async+traits discussion, \[B4C5D6\]: Python asyncio mention
 
 use super::tokenizer::Tokenizer;
 use super::vector_store::Embedding;
@@ -198,7 +198,11 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     let min_len = a.len().min(b.len());
-    let dot: f32 = a[..min_len].iter().zip(&b[..min_len]).map(|(x, y)| x * y).sum();
+    let dot: f32 = a[..min_len]
+        .iter()
+        .zip(&b[..min_len])
+        .map(|(x, y)| x * y)
+        .sum();
     let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let mag_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
     if mag_a == 0.0 || mag_b == 0.0 {
@@ -226,11 +230,7 @@ fn compute_centroid(embeddings: &[&Vec<f32>]) -> Vec<f32> {
 }
 
 /// Agglomerative clustering — bottom-up merging of most similar pairs
-fn agglomerative_cluster(
-    sim_matrix: &[Vec<f32>],
-    target_k: usize,
-    _threshold: f32,
-) -> Vec<usize> {
+fn agglomerative_cluster(sim_matrix: &[Vec<f32>], target_k: usize, _threshold: f32) -> Vec<usize> {
     let n = sim_matrix.len();
     if n == 0 {
         return vec![];
@@ -341,7 +341,11 @@ mod tests {
         assert!(result.fragments.len() >= 1);
         assert!(result.fragments.len() <= 8);
         // Total sentences should be preserved
-        let total_sentences: usize = result.fragments.iter().map(|f| f.sentence_indices.len()).sum();
+        let total_sentences: usize = result
+            .fragments
+            .iter()
+            .map(|f| f.sentence_indices.len())
+            .sum();
         assert_eq!(total_sentences, result.sentences.len());
     }
 
@@ -349,7 +353,8 @@ mod tests {
     fn fragment_preserves_all_text() {
         let mut tokenizer = Tokenizer::new();
         let config = FragmentConfig::default();
-        let text = "First topic about databases. Second topic about networking. Third about security.";
+        let text =
+            "First topic about databases. Second topic about networking. Third about security.";
         let result = fragment_message(text, &mut tokenizer, &config);
 
         // All sentences should appear in exactly one fragment

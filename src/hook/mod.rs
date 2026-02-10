@@ -180,8 +180,7 @@ impl HookPipeline {
         mut is_error: bool,
     ) -> (String, bool) {
         for hook in &self.persist {
-            let (new_content, new_error) =
-                hook.transform_tool_result(tool_name, content, is_error);
+            let (new_content, new_error) = hook.transform_tool_result(tool_name, content, is_error);
             content = new_content;
             is_error = new_error;
         }
@@ -357,8 +356,7 @@ mod tests {
         let mut pipeline = HookPipeline::new();
         pipeline.add_persist(Arc::new(TruncatePersistHook { max_len: 10 }));
 
-        let (content, is_error) =
-            pipeline.transform_tool_result("read", "short".into(), false);
+        let (content, is_error) = pipeline.transform_tool_result("read", "short".into(), false);
         assert_eq!(content, "short");
         assert!(!is_error);
 
@@ -374,8 +372,7 @@ mod tests {
     #[test]
     fn empty_pipeline_passthrough() {
         let pipeline = HookPipeline::new();
-        let (content, is_error) =
-            pipeline.transform_tool_result("test", "hello".into(), false);
+        let (content, is_error) = pipeline.transform_tool_result("test", "hello".into(), false);
         assert_eq!(content, "hello");
         assert!(!is_error);
     }

@@ -15,10 +15,7 @@ pub enum SoulError {
     Auth(String),
 
     #[error("Tool execution error: tool={tool_name}, {message}")]
-    ToolExecution {
-        tool_name: String,
-        message: String,
-    },
+    ToolExecution { tool_name: String, message: String },
 
     #[error("Context overflow: {used_tokens} tokens used, {max_tokens} max")]
     ContextOverflow {

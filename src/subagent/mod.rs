@@ -67,14 +67,9 @@ impl SubagentSpawner {
         messages: Vec<Message>,
         auth: &AuthProfile,
     ) -> SoulResult<SubagentResult> {
-        let provider = self
-            .get_provider(&config.model.provider)
-            .ok_or_else(|| {
-                crate::error::SoulError::Provider(format!(
-                    "No provider for {}",
-                    config.model.provider
-                ))
-            })?;
+        let provider = self.get_provider(&config.model.provider).ok_or_else(|| {
+            crate::error::SoulError::Provider(format!("No provider for {}", config.model.provider))
+        })?;
 
         let (tx, _rx) = mpsc::unbounded_channel();
 
@@ -143,7 +138,7 @@ impl SubagentSpawner {
     ) -> SoulResult<SubagentResult> {
         let messages_text: Vec<String> = messages
             .iter()
-            .map(|m| format!("[{}] {}", m.role.to_string(), m.text_content()))
+            .map(|m| format!("[{}] {}", m.role, m.text_content()))
             .collect();
 
         let prompt = format!(
@@ -241,7 +236,13 @@ mod tests {
 
     #[test]
     fn subagent_role_eq() {
-        assert_eq!(SubagentRole::MetadataExtractor, SubagentRole::MetadataExtractor);
-        assert_ne!(SubagentRole::MetadataExtractor, SubagentRole::SafetyValidator);
+        assert_eq!(
+            SubagentRole::MetadataExtractor,
+            SubagentRole::MetadataExtractor
+        );
+        assert_ne!(
+            SubagentRole::MetadataExtractor,
+            SubagentRole::SafetyValidator
+        );
     }
 }

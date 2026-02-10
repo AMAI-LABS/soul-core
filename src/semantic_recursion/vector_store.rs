@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use super::tokenizer::{Tokenizer, TokenizedText};
+use super::tokenizer::{TokenizedText, Tokenizer};
 
 /// An embedding vector
 #[derive(Debug, Clone)]
@@ -95,7 +95,7 @@ impl VectorStore {
         });
 
         // Recompute embeddings when IDF changes significantly
-        if self.total_docs % 10 == 0 {
+        if self.total_docs.is_multiple_of(10) {
             self.reindex();
         }
 
@@ -167,7 +167,10 @@ impl VectorStore {
 
     /// Get entry by ID
     pub fn get(&self, id: usize) -> Option<&str> {
-        self.entries.iter().find(|e| e.id == id).map(|e| e.text.as_str())
+        self.entries
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.text.as_str())
     }
 
     /// Total number of entries
@@ -188,8 +191,12 @@ impl VectorStore {
     fn reindex(&mut self) {
         // Collect texts first to avoid borrow conflict with &mut self.tokenizer
         let texts: Vec<String> = self.entries.iter().map(|e| e.text.clone()).collect();
-        let tokenized: Vec<TokenizedText> = texts.iter().map(|t| self.tokenizer.tokenize(t)).collect();
-        let embeddings: Vec<Embedding> = tokenized.iter().map(|t| self.compute_tfidf_embedding(t)).collect();
+        let tokenized: Vec<TokenizedText> =
+            texts.iter().map(|t| self.tokenizer.tokenize(t)).collect();
+        let embeddings: Vec<Embedding> = tokenized
+            .iter()
+            .map(|t| self.compute_tfidf_embedding(t))
+            .collect();
         for (entry, emb) in self.entries.iter_mut().zip(embeddings) {
             entry.embedding = emb;
         }
@@ -324,7 +331,10 @@ mod tests {
     fn vector_store_many_entries() {
         let mut store = VectorStore::new();
         for i in 0..50 {
-            store.insert(&format!("document number {i} about various topics"), HashMap::new());
+            store.insert(
+                &format!("document number {i} about various topics"),
+                HashMap::new(),
+            );
         }
         assert_eq!(store.len(), 50);
 

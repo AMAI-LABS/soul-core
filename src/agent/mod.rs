@@ -24,11 +24,7 @@ pub struct RunOptions {
 }
 
 impl AgentLoop {
-    pub fn new(
-        provider: Arc<dyn Provider>,
-        tools: ToolRegistry,
-        config: AgentConfig,
-    ) -> Self {
+    pub fn new(provider: Arc<dyn Provider>, tools: ToolRegistry, config: AgentConfig) -> Self {
         let context_config = ContextConfig {
             max_tokens: config.model.context_window,
             compaction_threshold: config.compaction_threshold,
@@ -98,13 +94,19 @@ impl AgentLoop {
 
             // Check if compaction needed
             let system_tokens = system_prompt.len() / 4;
-            if self.context_manager.needs_compaction(&messages, system_tokens) {
+            if self
+                .context_manager
+                .needs_compaction(&messages, system_tokens)
+            {
                 let _ = event_tx.send(AgentEvent::CompactionStart {
                     messages_before: messages.len(),
                     tokens_before: ContextManager::estimate_tokens(&messages),
                 });
 
-                match self.context_manager.compact(&mut messages, None, system_tokens) {
+                match self
+                    .context_manager
+                    .compact(&mut messages, None, system_tokens)
+                {
                     Ok(result) => {
                         let _ = event_tx.send(AgentEvent::CompactionEnd {
                             messages_after: result.messages_after,
@@ -169,7 +171,12 @@ impl AgentLoop {
 
             if has_more_tool_calls {
                 for tc in &tool_calls {
-                    if let ContentBlock::ToolCall { id, name, arguments } = tc {
+                    if let ContentBlock::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                    } = tc
+                    {
                         // Run before_tool_call hook
                         let hook_ctx = BeforeToolCallContext {
                             tool_name: name.clone(),
@@ -182,8 +189,11 @@ impl AgentLoop {
                         let (tool_name, tool_args) = match hook_result {
                             HookAction::Continue(ctx) => (ctx.tool_name, ctx.arguments),
                             HookAction::Cancel(reason) => {
-                                let err_msg =
-                                    Message::tool_result(id.clone(), format!("Blocked: {reason}"), true);
+                                let err_msg = Message::tool_result(
+                                    id.clone(),
+                                    format!("Blocked: {reason}"),
+                                    true,
+                                );
                                 messages.push(err_msg.clone());
                                 new_messages.push(err_msg);
                                 continue;
@@ -312,9 +322,7 @@ mod tests {
             // Simulate streaming
             for block in &msg.content {
                 if let ContentBlock::Text { text } = block {
-                    let _ = event_tx.send(StreamDelta::TextDelta {
-                        text: text.clone(),
-                    });
+                    let _ = event_tx.send(StreamDelta::TextDelta { text: text.clone() });
                 }
             }
             Ok(msg)
@@ -370,10 +378,7 @@ mod tests {
             arguments: serde_json::Value,
             _partial_tx: Option<mpsc::UnboundedSender<String>>,
         ) -> SoulResult<ToolOutput> {
-            let text = arguments
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let text = arguments.get("text").and_then(|v| v.as_str()).unwrap_or("");
             Ok(ToolOutput::success(text.to_uppercase()))
         }
     }

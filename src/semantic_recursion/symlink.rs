@@ -59,21 +59,16 @@ impl SymlinkStore {
 
     /// Create a symlink for a piece of content.
     /// Returns the 6-char hash.
-    pub fn create(
-        &mut self,
-        node_id: NodeId,
-        content: &str,
-        summary: &str,
-    ) -> String {
+    pub fn create(&mut self, node_id: NodeId, content: &str, summary: &str) -> String {
         // Check if already symlinked
         if let Some(hash) = self.node_to_hash.get(&node_id) {
             return hash.clone();
         }
 
         let hash = self.generate_hash(content);
-        let original_tokens = (content.len() + 3) / 4;
+        let original_tokens = content.len().div_ceil(4);
         let symlink_form = format!("[{}]: {}", hash, summary);
-        let symlink_tokens = (symlink_form.len() + 3) / 4;
+        let symlink_tokens = symlink_form.len().div_ceil(4);
 
         let symlink = Symlink {
             hash: hash.clone(),
@@ -103,10 +98,7 @@ impl SymlinkStore {
 
     /// Resolve multiple hashes at once
     pub fn resolve_batch(&self, hashes: &[&str]) -> Vec<ResolveResult> {
-        hashes
-            .iter()
-            .filter_map(|h| self.resolve(h))
-            .collect()
+        hashes.iter().filter_map(|h| self.resolve(h)).collect()
     }
 
     /// Get the symlink hash for a node ID (if it exists)
@@ -128,9 +120,9 @@ impl SymlinkStore {
 
     /// How many tokens saved by symlinking a particular node
     pub fn tokens_saved(&self, hash: &str) -> Option<usize> {
-        self.links.get(&hash.to_uppercase()).map(|link| {
-            link.original_tokens.saturating_sub(link.symlink_tokens)
-        })
+        self.links
+            .get(&hash.to_uppercase())
+            .map(|link| link.original_tokens.saturating_sub(link.symlink_tokens))
     }
 
     /// Total tokens saved across all symlinks
@@ -162,7 +154,7 @@ impl SymlinkStore {
             .collect()
     }
 
-    /// Extract all symlink hashes referenced in a text (pattern: [XXXXXX])
+    /// Extract all symlink hashes referenced in a text (pattern: `[XXXXXX]`)
     pub fn extract_refs(text: &str) -> Vec<String> {
         let mut refs = Vec::new();
         let bytes = text.as_bytes();
@@ -210,10 +202,7 @@ impl SymlinkStore {
             }
             let digest = hasher.finalize();
             // Take first 3 bytes = 6 hex chars
-            let hash = format!(
-                "{:02X}{:02X}{:02X}",
-                digest[0], digest[1], digest[2]
-            );
+            let hash = format!("{:02X}{:02X}{:02X}", digest[0], digest[1], digest[2]);
 
             if !self.links.contains_key(&hash) {
                 return hash;
@@ -362,7 +351,11 @@ mod tests {
     #[test]
     fn search_by_summary() {
         let mut store = SymlinkStore::new();
-        store.create(0, "Full content about Rust programming", "Rust programming discussion");
+        store.create(
+            0,
+            "Full content about Rust programming",
+            "Rust programming discussion",
+        );
         store.create(1, "Python web development guide", "Python web dev");
         store.create(2, "More Rust async patterns", "Rust async patterns");
 

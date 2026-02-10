@@ -242,7 +242,10 @@ mod tests {
         let store = MemoryStore::new(dir.path());
 
         store.write_main("Main memory content").await.unwrap();
-        store.write_topic("patterns", "Some patterns").await.unwrap();
+        store
+            .write_topic("patterns", "Some patterns")
+            .await
+            .unwrap();
 
         let section = store.build_prompt_section().await.unwrap();
         assert!(section.contains("Main memory content"));
@@ -285,9 +288,12 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_build_prompt_section() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("CLAUDE.md"), "# Project\n\nInstructions here")
-            .await
-            .unwrap();
+        tokio::fs::write(
+            dir.path().join("CLAUDE.md"),
+            "# Project\n\nInstructions here",
+        )
+        .await
+        .unwrap();
 
         let bootstrap = BootstrapFiles::new(dir.path());
         let section = bootstrap.build_prompt_section().await.unwrap();

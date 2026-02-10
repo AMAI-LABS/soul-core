@@ -17,7 +17,7 @@ use crate::types::ToolDefinition;
 use super::symlink::SymlinkStore;
 
 /// Tool that resolves symlink hashes back to full content.
-/// Shared ownership via Arc<RwLock<SymlinkStore>> so the agent loop
+/// Shared ownership via `Arc<RwLock<SymlinkStore>>` so the agent loop
 /// can symlink messages while the tool resolves them concurrently.
 pub struct ResolveSymlinkTool {
     store: Arc<RwLock<SymlinkStore>>,
@@ -180,14 +180,12 @@ impl Tool for SearchSymlinksTool {
 
         let metadata = json!({ "count": results.len() });
 
-        Ok(
-            ToolOutput::success(format!(
-                "Found {} matching symlinks:\n{}",
-                results.len(),
-                output.join("\n")
-            ))
-            .with_metadata(metadata),
-        )
+        Ok(ToolOutput::success(format!(
+            "Found {} matching symlinks:\n{}",
+            results.len(),
+            output.join("\n")
+        ))
+        .with_metadata(metadata))
     }
 }
 
@@ -248,7 +246,11 @@ impl Tool for ListSymlinksTool {
         lines.sort(); // deterministic order
 
         let total_saved = store.total_tokens_saved();
-        lines.push(format!("\nTotal: {} symlinks, {} tokens saved", store.len(), total_saved));
+        lines.push(format!(
+            "\nTotal: {} symlinks, {} tokens saved",
+            store.len(),
+            total_saved
+        ));
 
         Ok(ToolOutput::success(lines.join("\n")))
     }
@@ -260,9 +262,21 @@ mod tests {
 
     fn make_store() -> Arc<RwLock<SymlinkStore>> {
         let mut store = SymlinkStore::new();
-        store.create(0, "Full content about Rust async programming with tokio runtime and futures", "Rust async discussion");
-        store.create(1, "Python web development with Django and Flask frameworks", "Python web dev");
-        store.create(2, "Database optimization techniques for PostgreSQL", "DB optimization");
+        store.create(
+            0,
+            "Full content about Rust async programming with tokio runtime and futures",
+            "Rust async discussion",
+        );
+        store.create(
+            1,
+            "Python web development with Django and Flask frameworks",
+            "Python web dev",
+        );
+        store.create(
+            2,
+            "Database optimization techniques for PostgreSQL",
+            "DB optimization",
+        );
         Arc::new(RwLock::new(store))
     }
 
@@ -390,10 +404,7 @@ mod tests {
         let store = make_store();
         let tool = SearchSymlinksTool::new(store);
 
-        let result = tool
-            .execute("c1", json!({}), None)
-            .await
-            .unwrap();
+        let result = tool.execute("c1", json!({}), None).await.unwrap();
         assert!(result.is_error);
     }
 
@@ -402,10 +413,7 @@ mod tests {
         let store = make_store();
         let tool = ListSymlinksTool::new(store);
 
-        let result = tool
-            .execute("c1", json!({}), None)
-            .await
-            .unwrap();
+        let result = tool.execute("c1", json!({}), None).await.unwrap();
         assert!(!result.is_error);
         assert!(result.content.contains("3 symlinks"));
         assert!(result.content.contains("Rust async"));
@@ -419,10 +427,7 @@ mod tests {
         let store = Arc::new(RwLock::new(SymlinkStore::new()));
         let tool = ListSymlinksTool::new(store);
 
-        let result = tool
-            .execute("c1", json!({}), None)
-            .await
-            .unwrap();
+        let result = tool.execute("c1", json!({}), None).await.unwrap();
         assert!(!result.is_error);
         assert!(result.content.contains("No symlinks active"));
     }

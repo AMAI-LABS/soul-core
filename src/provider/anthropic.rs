@@ -79,7 +79,11 @@ impl AnthropicProvider {
             .iter()
             .map(|block| match block {
                 ContentBlock::Text { text } => json!({"type": "text", "text": text}),
-                ContentBlock::ToolCall { id, name, arguments } => {
+                ContentBlock::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                } => {
                     json!({
                         "type": "tool_use",
                         "id": id,
@@ -121,11 +125,7 @@ impl AnthropicProvider {
         })
     }
 
-    fn parse_sse_event(
-        &self,
-        event_type: &str,
-        data: &serde_json::Value,
-    ) -> Option<StreamDelta> {
+    fn parse_sse_event(&self, event_type: &str, data: &serde_json::Value) -> Option<StreamDelta> {
         match event_type {
             "content_block_delta" => {
                 let delta = data.get("delta")?;
@@ -218,10 +218,7 @@ impl Provider for AnthropicProvider {
         for line in text.lines() {
             if let Some(data_str) = line.strip_prefix("data: ") {
                 if let Ok(data) = serde_json::from_str::<serde_json::Value>(data_str) {
-                    let event_type = data
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let event_type = data.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
                     match event_type {
                         "content_block_start" => {
@@ -287,8 +284,7 @@ impl Provider for AnthropicProvider {
                                             },
                                         ) => {
                                             // Accumulate JSON fragments
-                                            let current =
-                                                args.as_str().unwrap_or("").to_string();
+                                            let current = args.as_str().unwrap_or("").to_string();
                                             let new = format!("{current}{arguments_delta}");
                                             *args = serde_json::Value::String(new);
                                         }
@@ -299,8 +295,7 @@ impl Provider for AnthropicProvider {
                         }
                         "message_delta" => {
                             if let Some(u) = data.get("usage") {
-                                if let Some(out) = u.get("output_tokens").and_then(|v| v.as_u64())
-                                {
+                                if let Some(out) = u.get("output_tokens").and_then(|v| v.as_u64()) {
                                     usage.output_tokens = out as usize;
                                 }
                             }
@@ -370,9 +365,7 @@ impl Provider for AnthropicProvider {
 
         if !response.status().is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(SoulError::Provider(format!(
-                "Token count failed: {body}"
-            )));
+            return Err(SoulError::Provider(format!("Token count failed: {body}")));
         }
 
         let data: serde_json::Value = response.json().await?;
@@ -384,11 +377,7 @@ impl Provider for AnthropicProvider {
         Ok(count)
     }
 
-    async fn probe(
-        &self,
-        model: &ModelInfo,
-        auth: &AuthProfile,
-    ) -> SoulResult<ProbeResult> {
+    async fn probe(&self, model: &ModelInfo, auth: &AuthProfile) -> SoulResult<ProbeResult> {
         let url = format!("{}/v1/messages", self.base_url);
         let body = json!({
             "model": model.id,
@@ -544,7 +533,9 @@ mod tests {
             "delta": {"type": "thinking_delta", "thinking": "Let me think..."}
         });
         let delta = provider.parse_sse_event("content_block_delta", &data);
-        assert!(matches!(delta, Some(StreamDelta::ThinkingDelta { text }) if text == "Let me think..."));
+        assert!(
+            matches!(delta, Some(StreamDelta::ThinkingDelta { text }) if text == "Let me think...")
+        );
     }
 
     #[test]

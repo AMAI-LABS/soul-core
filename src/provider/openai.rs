@@ -81,7 +81,11 @@ impl OpenAIProvider {
                 for block in &msg.content {
                     match block {
                         ContentBlock::Text { text } => content_text.push_str(text),
-                        ContentBlock::ToolCall { id, name, arguments } => {
+                        ContentBlock::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        } => {
                             tool_calls.push(json!({
                                 "id": id,
                                 "type": "function",
@@ -191,8 +195,7 @@ impl Provider for OpenAIProvider {
                         if let Some(choice) = choices.first() {
                             if let Some(delta) = choice.get("delta") {
                                 // Text content
-                                if let Some(content) =
-                                    delta.get("content").and_then(|v| v.as_str())
+                                if let Some(content) = delta.get("content").and_then(|v| v.as_str())
                                 {
                                     content_text.push_str(content);
                                     let _ = event_tx.send(StreamDelta::TextDelta {
@@ -211,12 +214,14 @@ impl Provider for OpenAIProvider {
 
                                         // Ensure vector has enough entries
                                         while tool_calls.len() <= idx {
-                                            tool_calls.push((String::new(), String::new(), String::new()));
+                                            tool_calls.push((
+                                                String::new(),
+                                                String::new(),
+                                                String::new(),
+                                            ));
                                         }
 
-                                        if let Some(id) =
-                                            tc.get("id").and_then(|v| v.as_str())
-                                        {
+                                        if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
                                             tool_calls[idx].0 = id.to_string();
                                         }
                                         if let Some(func) = tc.get("function") {
@@ -229,12 +234,11 @@ impl Provider for OpenAIProvider {
                                                 func.get("arguments").and_then(|v| v.as_str())
                                             {
                                                 tool_calls[idx].2.push_str(args);
-                                                let _ =
-                                                    event_tx.send(StreamDelta::ToolCallDelta {
-                                                        id: tool_calls[idx].0.clone(),
-                                                        name: tool_calls[idx].1.clone(),
-                                                        arguments_delta: args.to_string(),
-                                                    });
+                                                let _ = event_tx.send(StreamDelta::ToolCallDelta {
+                                                    id: tool_calls[idx].0.clone(),
+                                                    name: tool_calls[idx].1.clone(),
+                                                    arguments_delta: args.to_string(),
+                                                });
                                             }
                                         }
                                     }
@@ -289,11 +293,7 @@ impl Provider for OpenAIProvider {
         Ok(total)
     }
 
-    async fn probe(
-        &self,
-        model: &ModelInfo,
-        auth: &AuthProfile,
-    ) -> SoulResult<ProbeResult> {
+    async fn probe(&self, model: &ModelInfo, auth: &AuthProfile) -> SoulResult<ProbeResult> {
         let url = format!("{}/v1/chat/completions", self.base_url);
         let body = json!({
             "model": model.id,

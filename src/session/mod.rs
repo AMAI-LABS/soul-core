@@ -74,11 +74,7 @@ impl SessionStore {
     }
 
     /// Append a message to the session transcript (JSONL)
-    pub async fn append_message(
-        &self,
-        session_id: &str,
-        message: &Message,
-    ) -> SoulResult<()> {
+    pub async fn append_message(&self, session_id: &str, message: &Message) -> SoulResult<()> {
         tokio::fs::create_dir_all(&self.base_dir).await?;
         let path = self.session_path(session_id);
         let line = serde_json::to_string(message)? + "\n";

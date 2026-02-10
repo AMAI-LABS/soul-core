@@ -103,12 +103,12 @@ pub struct RlmEngine {
 }
 
 impl RlmEngine {
-    pub fn new(
-        provider: Arc<dyn Provider>,
-        config: RlmConfig,
-        auth: AuthProfile,
-    ) -> Self {
-        Self { provider, config, auth }
+    pub fn new(provider: Arc<dyn Provider>, config: RlmConfig, auth: AuthProfile) -> Self {
+        Self {
+            provider,
+            config,
+            auth,
+        }
     }
 
     /// Run an RLM completion over a context
@@ -120,14 +120,16 @@ impl RlmEngine {
         let mut env = RlmEnvironment::new();
         env.load_context(context);
 
-        let system = self.config.system_prompt_override.as_deref()
+        let system = self
+            .config
+            .system_prompt_override
+            .as_deref()
             .unwrap_or(RLM_SYSTEM_PROMPT);
 
         let metadata = env.context_metadata();
 
-        let mut messages: Vec<Message> = vec![
-            Message::assistant(format!("Context loaded. {metadata}")),
-        ];
+        let mut messages: Vec<Message> =
+            vec![Message::assistant(format!("Context loaded. {metadata}"))];
 
         let user_prompt = if let Some(rp) = root_prompt {
             format!(
@@ -135,7 +137,8 @@ impl RlmEngine {
                 Use ```rlm``` code blocks to examine and process the context. Your next action:"
             )
         } else {
-            "Examine the context and process it using ```rlm``` code blocks. Your next action:".into()
+            "Examine the context and process it using ```rlm``` code blocks. Your next action:"
+                .into()
         };
         messages.push(Message::user(user_prompt));
 
@@ -146,14 +149,10 @@ impl RlmEngine {
         for i in 0..self.config.max_iterations {
             // Call LLM
             let (tx, _rx) = mpsc::unbounded_channel();
-            let response = self.provider.stream(
-                &messages,
-                system,
-                &[],
-                &self.config.model,
-                &self.auth,
-                tx,
-            ).await?;
+            let response = self
+                .provider
+                .stream(&messages, system, &[], &self.config.model, &self.auth, tx)
+                .await?;
 
             if let Some(usage) = &response.usage {
                 total_usage.input_tokens += usage.input_tokens;
@@ -186,16 +185,27 @@ impl RlmEngine {
                                 Ok(ExecResult::FinalAnswer(answer)) => {
                                     final_answer = Some(answer);
                                 }
-                                Ok(ExecResult::QueryRequest { target, prompt, context }) => {
+                                Ok(ExecResult::QueryRequest {
+                                    target,
+                                    prompt,
+                                    context,
+                                }) => {
                                     // Execute sub-LLM query
                                     let sub_prompt = format!("{prompt}\n\nContext:\n{context}");
                                     let sub_response = self.sub_query(&sub_prompt).await?;
                                     total_llm_calls += 1;
                                     sub_queries += 1;
                                     env.set_var(&target, Variable::Text(sub_response.clone()));
-                                    iter_outputs.push(format!("[QUERY → {target}]: {} chars", sub_response.len()));
+                                    iter_outputs.push(format!(
+                                        "[QUERY → {target}]: {} chars",
+                                        sub_response.len()
+                                    ));
                                 }
-                                Ok(ExecResult::QueryBatchRequest { target, prompts, contexts }) => {
+                                Ok(ExecResult::QueryBatchRequest {
+                                    target,
+                                    prompts,
+                                    contexts,
+                                }) => {
                                     let mut results = Vec::new();
                                     for (prompt, ctx) in prompts.iter().zip(contexts.iter()) {
                                         let sub_prompt = format!("{prompt}\n\nContext:\n{ctx}");
@@ -206,9 +216,14 @@ impl RlmEngine {
                                     }
                                     let count = results.len();
                                     env.set_var(&target, Variable::List(results));
-                                    iter_outputs.push(format!("[QUERY_BATCH → {target}]: {count} results"));
+                                    iter_outputs
+                                        .push(format!("[QUERY_BATCH → {target}]: {count} results"));
                                 }
-                                Ok(ExecResult::MapRequest { target, items, prompt_template }) => {
+                                Ok(ExecResult::MapRequest {
+                                    target,
+                                    items,
+                                    prompt_template,
+                                }) => {
                                     let mut results = Vec::new();
                                     for item in &items {
                                         let prompt = prompt_template.replace("{item}", item);
@@ -221,7 +236,11 @@ impl RlmEngine {
                                     env.set_var(&target, Variable::List(results));
                                     iter_outputs.push(format!("[MAP → {target}]: {count} results"));
                                 }
-                                Ok(ExecResult::FilterRequest { target, items, condition }) => {
+                                Ok(ExecResult::FilterRequest {
+                                    target,
+                                    items,
+                                    condition,
+                                }) => {
                                     let mut kept = Vec::new();
                                     for item in &items {
                                         let prompt = format!(
@@ -236,7 +255,8 @@ impl RlmEngine {
                                     }
                                     let count = kept.len();
                                     env.set_var(&target, Variable::List(kept));
-                                    iter_outputs.push(format!("[FILTER → {target}]: {count} items kept"));
+                                    iter_outputs
+                                        .push(format!("[FILTER → {target}]: {count} items kept"));
                                 }
                                 Err(e) => {
                                     iter_outputs.push(format!("Error: {e}"));
@@ -292,14 +312,10 @@ impl RlmEngine {
         ));
 
         let (tx, _) = mpsc::unbounded_channel();
-        let response = self.provider.stream(
-            &messages,
-            system,
-            &[],
-            &self.config.model,
-            &self.auth,
-            tx,
-        ).await?;
+        let response = self
+            .provider
+            .stream(&messages, system, &[], &self.config.model, &self.auth, tx)
+            .await?;
         total_llm_calls += 1;
 
         let answer = response.text_content();
@@ -317,14 +333,17 @@ impl RlmEngine {
         let messages = vec![Message::user(prompt.to_string())];
         let (tx, _) = mpsc::unbounded_channel();
 
-        let response = self.provider.stream(
-            &messages,
-            "You are a helpful assistant. Answer concisely based on the provided context.",
-            &[],
-            &self.config.model,
-            &self.auth,
-            tx,
-        ).await?;
+        let response = self
+            .provider
+            .stream(
+                &messages,
+                "You are a helpful assistant. Answer concisely based on the provided context.",
+                &[],
+                &self.config.model,
+                &self.auth,
+                tx,
+            )
+            .await?;
 
         Ok(response.text_content())
     }

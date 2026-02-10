@@ -96,12 +96,14 @@ impl RlmEnvironment {
 
     /// Load context into the environment
     pub fn load_context(&mut self, context: String) {
-        self.variables.insert("context".into(), Variable::Text(context));
+        self.variables
+            .insert("context".into(), Variable::Text(context));
     }
 
     /// Load context as a list of documents
     pub fn load_context_list(&mut self, documents: Vec<String>) {
-        self.variables.insert("context".into(), Variable::List(documents));
+        self.variables
+            .insert("context".into(), Variable::List(documents));
     }
 
     /// Set a variable
@@ -121,9 +123,7 @@ impl RlmEnvironment {
                 let len = s.len();
                 let lines = s.lines().count();
                 let preview = &s[..s.len().min(200)];
-                format!(
-                    "Context: text, {len} chars, {lines} lines\nPreview: {preview}..."
-                )
+                format!("Context: text, {len} chars, {lines} lines\nPreview: {preview}...")
             }
             Some(Variable::List(v)) => {
                 let count = v.len();
@@ -146,7 +146,11 @@ impl RlmEnvironment {
     /// Execute a DSL command that doesn't require LLM calls
     pub fn execute(&mut self, command: &DslCommand) -> SoulResult<ExecResult> {
         match command {
-            DslCommand::ChunkByLines { target, source, lines_per_chunk } => {
+            DslCommand::ChunkByLines {
+                target,
+                source,
+                lines_per_chunk,
+            } => {
                 let text = self.require_text(source)?;
                 let lines: Vec<&str> = text.lines().collect();
                 let chunks: Vec<String> = lines
@@ -154,10 +158,17 @@ impl RlmEnvironment {
                     .map(|chunk| chunk.join("\n"))
                     .collect();
                 let count = chunks.len();
-                self.variables.insert(target.clone(), Variable::List(chunks));
-                Ok(ExecResult::Output(format!("Chunked into {count} parts by {lines_per_chunk} lines each")))
+                self.variables
+                    .insert(target.clone(), Variable::List(chunks));
+                Ok(ExecResult::Output(format!(
+                    "Chunked into {count} parts by {lines_per_chunk} lines each"
+                )))
             }
-            DslCommand::ChunkByChars { target, source, chars_per_chunk } => {
+            DslCommand::ChunkByChars {
+                target,
+                source,
+                chars_per_chunk,
+            } => {
                 let text = self.require_text(source)?;
                 let mut chunks = Vec::new();
                 let mut start = 0;
@@ -176,28 +187,46 @@ impl RlmEnvironment {
                     start = actual_end;
                 }
                 let count = chunks.len();
-                self.variables.insert(target.clone(), Variable::List(chunks));
-                Ok(ExecResult::Output(format!("Chunked into {count} parts by ~{chars_per_chunk} chars")))
+                self.variables
+                    .insert(target.clone(), Variable::List(chunks));
+                Ok(ExecResult::Output(format!(
+                    "Chunked into {count} parts by ~{chars_per_chunk} chars"
+                )))
             }
-            DslCommand::ChunkByRegex { target, source, pattern } => {
+            DslCommand::ChunkByRegex {
+                target,
+                source,
+                pattern,
+            } => {
                 let text = self.require_text(source)?;
                 // Simple regex-like split on pattern (basic implementation)
-                let chunks: Vec<String> = text.split(pattern.as_str())
+                let chunks: Vec<String> = text
+                    .split(pattern.as_str())
                     .filter(|s| !s.trim().is_empty())
                     .map(|s| s.to_string())
                     .collect();
                 let count = chunks.len();
-                self.variables.insert(target.clone(), Variable::List(chunks));
-                Ok(ExecResult::Output(format!("Split into {count} sections by pattern \"{pattern}\"")))
+                self.variables
+                    .insert(target.clone(), Variable::List(chunks));
+                Ok(ExecResult::Output(format!(
+                    "Split into {count} sections by pattern \"{pattern}\""
+                )))
             }
-            DslCommand::Slice { target, source, start, end } => {
+            DslCommand::Slice {
+                target,
+                source,
+                start,
+                end,
+            } => {
                 let text = self.require_text(source)?;
                 let actual_start = (*start).min(text.len());
                 let actual_end = (*end).min(text.len());
                 let slice = text[actual_start..actual_end].to_string();
                 let len = slice.len();
                 self.variables.insert(target.clone(), Variable::Text(slice));
-                Ok(ExecResult::Output(format!("Sliced [{start}..{end}], {len} chars")))
+                Ok(ExecResult::Output(format!(
+                    "Sliced [{start}..{end}], {len} chars"
+                )))
             }
             DslCommand::Len { target, source } => {
                 let var = self.require_var(source)?;
@@ -209,37 +238,56 @@ impl RlmEnvironment {
                 self.variables.insert(target.clone(), Variable::Number(len));
                 Ok(ExecResult::Output(format!("{source} length = {len}")))
             }
-            DslCommand::Join { target, source, separator } => {
+            DslCommand::Join {
+                target,
+                source,
+                separator,
+            } => {
                 let list = self.require_list(source)?;
                 let sep = separator.replace("\\n", "\n").replace("\\t", "\t");
                 let joined = list.join(&sep);
                 let len = joined.len();
-                self.variables.insert(target.clone(), Variable::Text(joined));
-                Ok(ExecResult::Output(format!("Joined {source} into {len} chars")))
+                self.variables
+                    .insert(target.clone(), Variable::Text(joined));
+                Ok(ExecResult::Output(format!(
+                    "Joined {source} into {len} chars"
+                )))
             }
             DslCommand::Get { target, source } => {
                 let var = self.require_var(source)?.clone();
                 self.variables.insert(target.clone(), var);
                 Ok(ExecResult::Silent)
             }
-            DslCommand::Concat { target, left, right } => {
+            DslCommand::Concat {
+                target,
+                left,
+                right,
+            } => {
                 let l = self.require_text(left)?;
                 let r = self.require_text(right)?;
                 let combined = format!("{l}{r}");
                 let len = combined.len();
-                self.variables.insert(target.clone(), Variable::Text(combined));
+                self.variables
+                    .insert(target.clone(), Variable::Text(combined));
                 Ok(ExecResult::Output(format!("Concatenated into {len} chars")))
             }
-            DslCommand::Index { target, source, index } => {
+            DslCommand::Index {
+                target,
+                source,
+                index,
+            } => {
                 let list = self.require_list(source)?;
                 if *index >= list.len() {
                     return Err(SoulError::Other(anyhow::anyhow!(
-                        "Index {index} out of bounds for {source} (len={})", list.len()
+                        "Index {index} out of bounds for {source} (len={})",
+                        list.len()
                     )));
                 }
                 let item = list[*index].clone();
                 self.variables.insert(target.clone(), Variable::Text(item));
-                Ok(ExecResult::Output(format!("Got item [{index}] from {source}")))
+                Ok(ExecResult::Output(format!(
+                    "Got item [{index}] from {source}"
+                )))
             }
             DslCommand::Print { var_name } => {
                 let var = self.require_var(var_name)?;
@@ -252,9 +300,19 @@ impl RlmEnvironment {
                         }
                     }
                     Variable::List(v) => {
-                        format!("List[{}]: {:?}", v.len(), v.iter().map(|s| {
-                            if s.len() > 100 { format!("{}...", &s[..100]) } else { s.clone() }
-                        }).collect::<Vec<_>>())
+                        format!(
+                            "List[{}]: {:?}",
+                            v.len(),
+                            v.iter()
+                                .map(|s| {
+                                    if s.len() > 100 {
+                                        format!("{}...", &s[..100])
+                                    } else {
+                                        s.clone()
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                        )
                     }
                     Variable::Number(n) => n.to_string(),
                 };
@@ -262,7 +320,9 @@ impl RlmEnvironment {
                 Ok(ExecResult::Output(output))
             }
             DslCommand::ShowVars => {
-                let vars: Vec<String> = self.variables.iter()
+                let vars: Vec<String> = self
+                    .variables
+                    .iter()
                     .map(|(k, v)| format!("  {k}: {}", v.type_name()))
                     .collect();
                 let output = if vars.is_empty() {
@@ -276,11 +336,13 @@ impl RlmEnvironment {
                 let var = self.require_var(var_name)?;
                 Ok(ExecResult::FinalAnswer(var.as_text()))
             }
-            DslCommand::FinalText { text } => {
-                Ok(ExecResult::FinalAnswer(text.clone()))
-            }
+            DslCommand::FinalText { text } => Ok(ExecResult::FinalAnswer(text.clone())),
             // LLM-requiring commands return requests
-            DslCommand::Query { target, prompt, context_var } => {
+            DslCommand::Query {
+                target,
+                prompt,
+                context_var,
+            } => {
                 let ctx = self.require_text(context_var)?;
                 Ok(ExecResult::QueryRequest {
                     target: target.clone(),
@@ -288,7 +350,11 @@ impl RlmEnvironment {
                     context: ctx,
                 })
             }
-            DslCommand::QueryBatch { target, prompts, context_vars } => {
+            DslCommand::QueryBatch {
+                target,
+                prompts,
+                context_vars,
+            } => {
                 let contexts: Vec<String> = context_vars
                     .iter()
                     .map(|v| self.require_text(v).unwrap_or_default())
@@ -313,7 +379,11 @@ impl RlmEnvironment {
                     contexts,
                 })
             }
-            DslCommand::Map { target, source, prompt_template } => {
+            DslCommand::Map {
+                target,
+                source,
+                prompt_template,
+            } => {
                 let items = self.require_list(source)?;
                 Ok(ExecResult::MapRequest {
                     target: target.clone(),
@@ -321,7 +391,11 @@ impl RlmEnvironment {
                     prompt_template: prompt_template.clone(),
                 })
             }
-            DslCommand::Filter { target, source, condition } => {
+            DslCommand::Filter {
+                target,
+                source,
+                condition,
+            } => {
                 let items = self.require_list(source)?;
                 Ok(ExecResult::FilterRequest {
                     target: target.clone(),
@@ -394,7 +468,10 @@ mod tests {
     #[test]
     fn chunk_by_lines() {
         let mut env = RlmEnvironment::new();
-        let text = (0..10).map(|i| format!("Line {i}")).collect::<Vec<_>>().join("\n");
+        let text = (0..10)
+            .map(|i| format!("Line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         env.load_context(text);
 
         let cmd = DslCommand::ChunkByLines {
@@ -460,7 +537,10 @@ mod tests {
     #[test]
     fn len_list() {
         let mut env = RlmEnvironment::new();
-        env.set_var("items", Variable::List(vec!["a".into(), "b".into(), "c".into()]));
+        env.set_var(
+            "items",
+            Variable::List(vec!["a".into(), "b".into(), "c".into()]),
+        );
 
         let cmd = DslCommand::Len {
             target: "count".into(),
@@ -474,7 +554,10 @@ mod tests {
     #[test]
     fn join_list() {
         let mut env = RlmEnvironment::new();
-        env.set_var("items", Variable::List(vec!["hello".into(), "world".into()]));
+        env.set_var(
+            "items",
+            Variable::List(vec!["hello".into(), "world".into()]),
+        );
 
         let cmd = DslCommand::Join {
             target: "text".into(),
@@ -519,7 +602,10 @@ mod tests {
     #[test]
     fn index_list() {
         let mut env = RlmEnvironment::new();
-        env.set_var("items", Variable::List(vec!["a".into(), "b".into(), "c".into()]));
+        env.set_var(
+            "items",
+            Variable::List(vec!["a".into(), "b".into(), "c".into()]),
+        );
 
         let cmd = DslCommand::Index {
             target: "second".into(),
@@ -549,7 +635,9 @@ mod tests {
         let mut env = RlmEnvironment::new();
         env.set_var("big", Variable::Text("x".repeat(1000)));
 
-        let cmd = DslCommand::Print { var_name: "big".into() };
+        let cmd = DslCommand::Print {
+            var_name: "big".into(),
+        };
         let result = env.execute(&cmd).unwrap();
         if let ExecResult::Output(s) = result {
             assert!(s.contains("chars total"));
@@ -576,14 +664,22 @@ mod tests {
         let mut env = RlmEnvironment::new();
         env.set_var("answer", Variable::Text("42".into()));
 
-        let result = env.execute(&DslCommand::Final { var_name: "answer".into() }).unwrap();
+        let result = env
+            .execute(&DslCommand::Final {
+                var_name: "answer".into(),
+            })
+            .unwrap();
         assert!(matches!(result, ExecResult::FinalAnswer(s) if s == "42"));
     }
 
     #[test]
     fn final_text() {
         let mut env = RlmEnvironment::new();
-        let result = env.execute(&DslCommand::FinalText { text: "direct answer".into() }).unwrap();
+        let result = env
+            .execute(&DslCommand::FinalText {
+                text: "direct answer".into(),
+            })
+            .unwrap();
         assert!(matches!(result, ExecResult::FinalAnswer(s) if s == "direct answer"));
     }
 
@@ -618,7 +714,9 @@ mod tests {
     #[test]
     fn missing_var_error() {
         let mut env = RlmEnvironment::new();
-        let cmd = DslCommand::Print { var_name: "nonexistent".into() };
+        let cmd = DslCommand::Print {
+            var_name: "nonexistent".into(),
+        };
         assert!(env.execute(&cmd).is_err());
     }
 }

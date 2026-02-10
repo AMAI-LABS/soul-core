@@ -61,10 +61,7 @@ pub enum DslCommand {
         end: usize,
     },
     /// LET var = LEN source
-    Len {
-        target: String,
-        source: String,
-    },
+    Len { target: String, source: String },
     /// LET var = JOIN source separator
     Join {
         target: String,
@@ -72,10 +69,7 @@ pub enum DslCommand {
         separator: String,
     },
     /// LET var = GET var_name (alias / copy)
-    Get {
-        target: String,
-        source: String,
-    },
+    Get { target: String, source: String },
     /// LET var = CONCAT a b
     Concat {
         target: String,
@@ -119,7 +113,11 @@ pub struct DslError {
 
 impl fmt::Display for DslError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Line {}: {} ({})", self.line, self.message, self.source_line)
+        write!(
+            f,
+            "Line {}: {} ({})",
+            self.line, self.message, self.source_line
+        )
     }
 }
 
@@ -236,9 +234,13 @@ impl DslParser {
                 let (prompt, rest) = Self::split_quoted_and_rest(&full_line)?;
                 let rest_tokens: Vec<&str> = rest.split_whitespace().collect();
                 if rest_tokens.is_empty() || rest_tokens[0].to_uppercase() != "WITH" {
-                    return Err("QUERY_BATCH syntax: QUERY_BATCH \"prompt\" WITH <chunks_var>".into());
+                    return Err(
+                        "QUERY_BATCH syntax: QUERY_BATCH \"prompt\" WITH <chunks_var>".into(),
+                    );
                 }
-                let context_var = rest_tokens.get(1).ok_or("QUERY_BATCH missing context variable")?;
+                let context_var = rest_tokens
+                    .get(1)
+                    .ok_or("QUERY_BATCH missing context variable")?;
                 Ok(DslCommand::QueryBatch {
                     target,
                     prompts: vec![prompt],
@@ -248,7 +250,9 @@ impl DslParser {
             "CHUNK" => {
                 // LET target = CHUNK source BY_LINES|BY_CHARS|BY_REGEX ...
                 if tokens.len() < 7 {
-                    return Err("CHUNK syntax: CHUNK <source> BY_LINES|BY_CHARS|BY_REGEX <value>".into());
+                    return Err(
+                        "CHUNK syntax: CHUNK <source> BY_LINES|BY_CHARS|BY_REGEX <value>".into(),
+                    );
                 }
                 let source = tokens[4].to_string();
                 let strategy = tokens[5].to_uppercase();
@@ -290,9 +294,18 @@ impl DslParser {
                     return Err("SLICE syntax: SLICE <source> <start> <end>".into());
                 }
                 let source = tokens[4].to_string();
-                let start: usize = tokens[5].parse().map_err(|_| "SLICE start must be a number")?;
-                let end: usize = tokens[6].parse().map_err(|_| "SLICE end must be a number")?;
-                Ok(DslCommand::Slice { target, source, start, end })
+                let start: usize = tokens[5]
+                    .parse()
+                    .map_err(|_| "SLICE start must be a number")?;
+                let end: usize = tokens[6]
+                    .parse()
+                    .map_err(|_| "SLICE end must be a number")?;
+                Ok(DslCommand::Slice {
+                    target,
+                    source,
+                    start,
+                    end,
+                })
             }
             "LEN" => {
                 if tokens.len() < 5 {
@@ -310,7 +323,11 @@ impl DslParser {
                 }
                 let source = tokens[4].to_string();
                 let separator = Self::extract_quoted_at(tokens, 5)?;
-                Ok(DslCommand::Join { target, source, separator })
+                Ok(DslCommand::Join {
+                    target,
+                    source,
+                    separator,
+                })
             }
             "GET" => {
                 if tokens.len() < 5 {
@@ -349,7 +366,11 @@ impl DslParser {
                 }
                 let source = tokens[4].to_string();
                 let prompt_template = Self::extract_quoted_at(tokens, 5)?;
-                Ok(DslCommand::Map { target, source, prompt_template })
+                Ok(DslCommand::Map {
+                    target,
+                    source,
+                    prompt_template,
+                })
             }
             "FILTER" => {
                 if tokens.len() < 6 {
@@ -357,7 +378,11 @@ impl DslParser {
                 }
                 let source = tokens[4].to_string();
                 let condition = Self::extract_quoted_at(tokens, 5)?;
-                Ok(DslCommand::Filter { target, source, condition })
+                Ok(DslCommand::Filter {
+                    target,
+                    source,
+                    condition,
+                })
             }
             _ => Err(format!("Unknown operation: {operation}")),
         }
@@ -409,20 +434,22 @@ impl DslParser {
         } else {
             // Rejoin remaining tokens and try to extract
             let rest = tokens[index..].join(" ");
-            if rest.starts_with('"') {
-                if let Some(end) = rest[1..].find('"') {
-                    return Ok(rest[1..end + 1].to_string());
+            if let Some(stripped) = rest.strip_prefix('"') {
+                if let Some(end) = stripped.find('"') {
+                    return Ok(stripped[..end].to_string());
                 }
             }
-            Err(format!("Expected quoted string at position {index}, got: {token}"))
+            Err(format!(
+                "Expected quoted string at position {index}, got: {token}"
+            ))
         }
     }
 
     fn extract_quoted_from(line: &str, prefix: &str) -> Result<String, String> {
         let rest = line.strip_prefix(prefix).unwrap_or(line).trim();
-        if rest.starts_with('"') {
-            if let Some(end) = rest[1..].find('"') {
-                return Ok(rest[1..end + 1].to_string());
+        if let Some(stripped) = rest.strip_prefix('"') {
+            if let Some(end) = stripped.find('"') {
+                return Ok(stripped[..end].to_string());
             }
         }
         Err("Expected quoted string".into())
@@ -451,24 +478,31 @@ mod tests {
 
     #[test]
     fn parse_query() {
-        let cmds = DslParser::parse(r#"LET result = QUERY "summarize this document" WITH context"#).unwrap();
+        let cmds = DslParser::parse(r#"LET result = QUERY "summarize this document" WITH context"#)
+            .unwrap();
         assert_eq!(cmds.len(), 1);
-        assert!(matches!(&cmds[0], DslCommand::Query { target, prompt, context_var }
-            if target == "result" && prompt == "summarize this document" && context_var == "context"));
+        assert!(
+            matches!(&cmds[0], DslCommand::Query { target, prompt, context_var }
+            if target == "result" && prompt == "summarize this document" && context_var == "context")
+        );
     }
 
     #[test]
     fn parse_chunk_by_lines() {
         let cmds = DslParser::parse("LET chunks = CHUNK context BY_LINES 100").unwrap();
         assert_eq!(cmds.len(), 1);
-        assert!(matches!(&cmds[0], DslCommand::ChunkByLines { target, source, lines_per_chunk }
-            if target == "chunks" && source == "context" && *lines_per_chunk == 100));
+        assert!(
+            matches!(&cmds[0], DslCommand::ChunkByLines { target, source, lines_per_chunk }
+            if target == "chunks" && source == "context" && *lines_per_chunk == 100)
+        );
     }
 
     #[test]
     fn parse_chunk_by_chars() {
         let cmds = DslParser::parse("LET chunks = CHUNK context BY_CHARS 50000").unwrap();
-        assert!(matches!(&cmds[0], DslCommand::ChunkByChars { chars_per_chunk, .. } if *chars_per_chunk == 50000));
+        assert!(
+            matches!(&cmds[0], DslCommand::ChunkByChars { chars_per_chunk, .. } if *chars_per_chunk == 50000)
+        );
     }
 
     #[test]
@@ -480,13 +514,17 @@ mod tests {
     #[test]
     fn parse_slice() {
         let cmds = DslParser::parse("LET preview = SLICE context 0 1000").unwrap();
-        assert!(matches!(&cmds[0], DslCommand::Slice { start, end, .. } if *start == 0 && *end == 1000));
+        assert!(
+            matches!(&cmds[0], DslCommand::Slice { start, end, .. } if *start == 0 && *end == 1000)
+        );
     }
 
     #[test]
     fn parse_len() {
         let cmds = DslParser::parse("LET size = LEN context").unwrap();
-        assert!(matches!(&cmds[0], DslCommand::Len { target, source } if target == "size" && source == "context"));
+        assert!(
+            matches!(&cmds[0], DslCommand::Len { target, source } if target == "size" && source == "context")
+        );
     }
 
     #[test]
@@ -498,13 +536,17 @@ mod tests {
     #[test]
     fn parse_get() {
         let cmds = DslParser::parse("LET copy = GET original").unwrap();
-        assert!(matches!(&cmds[0], DslCommand::Get { target, source } if target == "copy" && source == "original"));
+        assert!(
+            matches!(&cmds[0], DslCommand::Get { target, source } if target == "copy" && source == "original")
+        );
     }
 
     #[test]
     fn parse_concat() {
         let cmds = DslParser::parse("LET merged = CONCAT part1 part2").unwrap();
-        assert!(matches!(&cmds[0], DslCommand::Concat { left, right, .. } if left == "part1" && right == "part2"));
+        assert!(
+            matches!(&cmds[0], DslCommand::Concat { left, right, .. } if left == "part1" && right == "part2")
+        );
     }
 
     #[test]
@@ -516,13 +558,18 @@ mod tests {
     #[test]
     fn parse_map() {
         let cmds = DslParser::parse(r#"LET summaries = MAP chunks "summarize: {item}""#).unwrap();
-        assert!(matches!(&cmds[0], DslCommand::Map { prompt_template, .. } if prompt_template == "summarize: {item}"));
+        assert!(
+            matches!(&cmds[0], DslCommand::Map { prompt_template, .. } if prompt_template == "summarize: {item}")
+        );
     }
 
     #[test]
     fn parse_filter() {
-        let cmds = DslParser::parse(r#"LET relevant = FILTER chunks "is this about rust?""#).unwrap();
-        assert!(matches!(&cmds[0], DslCommand::Filter { condition, .. } if condition == "is this about rust?"));
+        let cmds =
+            DslParser::parse(r#"LET relevant = FILTER chunks "is this about rust?""#).unwrap();
+        assert!(
+            matches!(&cmds[0], DslCommand::Filter { condition, .. } if condition == "is this about rust?")
+        );
     }
 
     #[test]

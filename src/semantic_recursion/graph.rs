@@ -115,7 +115,7 @@ impl ContextGraph {
         let id = self.next_id;
         self.next_id += 1;
 
-        let token_estimate = (content.len() + 3) / 4;
+        let token_estimate = content.len().div_ceil(4);
 
         self.nodes.insert(
             id,
@@ -135,13 +135,7 @@ impl ContextGraph {
     }
 
     /// Add an edge between two nodes
-    pub fn add_edge(
-        &mut self,
-        from: NodeId,
-        to: NodeId,
-        kind: EdgeKind,
-        weight: f32,
-    ) {
+    pub fn add_edge(&mut self, from: NodeId, to: NodeId, kind: EdgeKind, weight: f32) {
         let edge_idx = self.edges.len();
         self.edges.push(GraphEdge {
             from,
@@ -202,16 +196,8 @@ impl ContextGraph {
     /// Compact a set of nodes into a summary node.
     /// Original nodes are deactivated but never deleted.
     /// A CompactedInto edge is created from each original to the summary.
-    pub fn compact_nodes(
-        &mut self,
-        node_ids: &[NodeId],
-        summary: String,
-    ) -> NodeId {
-        let summary_id = self.add_node(
-            NodeKind::CompactionSummary,
-            summary,
-            HashMap::new(),
-        );
+    pub fn compact_nodes(&mut self, node_ids: &[NodeId], summary: String) -> NodeId {
+        let summary_id = self.add_node(NodeKind::CompactionSummary, summary, HashMap::new());
 
         for &id in node_ids {
             if let Some(node) = self.nodes.get_mut(&id) {
@@ -288,10 +274,7 @@ impl ContextGraph {
 
     /// Total token estimate for active nodes
     pub fn active_token_estimate(&self) -> usize {
-        self.active_nodes()
-            .iter()
-            .map(|n| n.token_estimate)
-            .sum()
+        self.active_nodes().iter().map(|n| n.token_estimate).sum()
     }
 }
 
@@ -398,9 +381,21 @@ mod tests {
     #[test]
     fn score_relevance() {
         let mut graph = ContextGraph::new();
-        graph.add_node(NodeKind::UserRequest, "rust programming language".into(), HashMap::new());
-        graph.add_node(NodeKind::LlmResponse, "python is great for data science".into(), HashMap::new());
-        graph.add_node(NodeKind::UserRequest, "rust async tokio".into(), HashMap::new());
+        graph.add_node(
+            NodeKind::UserRequest,
+            "rust programming language".into(),
+            HashMap::new(),
+        );
+        graph.add_node(
+            NodeKind::LlmResponse,
+            "python is great for data science".into(),
+            HashMap::new(),
+        );
+        graph.add_node(
+            NodeKind::UserRequest,
+            "rust async tokio".into(),
+            HashMap::new(),
+        );
 
         graph.score_relevance(&["rust".into(), "async".into()]);
 

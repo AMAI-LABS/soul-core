@@ -46,7 +46,11 @@ impl ContentBlock {
         ContentBlock::Text { text: s.into() }
     }
 
-    pub fn tool_call(id: impl Into<String>, name: impl Into<String>, args: serde_json::Value) -> Self {
+    pub fn tool_call(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        args: serde_json::Value,
+    ) -> Self {
         ContentBlock::ToolCall {
             id: id.into(),
             name: name.into(),
@@ -54,7 +58,11 @@ impl ContentBlock {
         }
     }
 
-    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>, is_error: bool) -> Self {
+    pub fn tool_result(
+        tool_call_id: impl Into<String>,
+        content: impl Into<String>,
+        is_error: bool,
+    ) -> Self {
         ContentBlock::ToolResult {
             tool_call_id: tool_call_id.into(),
             content: content.into(),
@@ -70,14 +78,14 @@ impl ContentBlock {
     pub fn estimate_tokens(&self) -> usize {
         let chars = match self {
             ContentBlock::Text { text } => text.len(),
-            ContentBlock::ToolCall { name, arguments, .. } => {
-                name.len() + arguments.to_string().len()
-            }
+            ContentBlock::ToolCall {
+                name, arguments, ..
+            } => name.len() + arguments.to_string().len(),
             ContentBlock::ToolResult { content, .. } => content.len(),
             ContentBlock::Thinking { text } => text.len(),
             ContentBlock::Image { data, .. } => data.len() / 4, // base64 overhead
         };
-        (chars + 3) / 4 // ceil division
+        chars.div_ceil(4)
     }
 }
 
@@ -118,7 +126,11 @@ impl Message {
         Self::new(Role::System, vec![ContentBlock::text(text)])
     }
 
-    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>, is_error: bool) -> Self {
+    pub fn tool_result(
+        tool_call_id: impl Into<String>,
+        content: impl Into<String>,
+        is_error: bool,
+    ) -> Self {
         Self::new(
             Role::Tool,
             vec![ContentBlock::tool_result(tool_call_id, content, is_error)],
@@ -291,9 +303,17 @@ pub enum AgentEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamDelta {
-    TextDelta { text: String },
-    ThinkingDelta { text: String },
-    ToolCallDelta { id: String, name: String, arguments_delta: String },
+    TextDelta {
+        text: String,
+    },
+    ThinkingDelta {
+        text: String,
+    },
+    ToolCallDelta {
+        id: String,
+        name: String,
+        arguments_delta: String,
+    },
 }
 
 // ─── Tool Definition ─────────────────────────────────────────────────────────
@@ -386,9 +406,7 @@ impl AuthProfile {
     }
 
     pub fn is_in_cooldown(&self) -> bool {
-        self.cooldown_until
-            .map(|t| Utc::now() < t)
-            .unwrap_or(false)
+        self.cooldown_until.map(|t| Utc::now() < t).unwrap_or(false)
     }
 }
 
@@ -436,11 +454,17 @@ impl StructuredState {
     }
 
     pub fn pending_count(&self) -> usize {
-        self.items.iter().filter(|i| i.status == ItemStatus::Pending).count()
+        self.items
+            .iter()
+            .filter(|i| i.status == ItemStatus::Pending)
+            .count()
     }
 
     pub fn completed_count(&self) -> usize {
-        self.items.iter().filter(|i| i.status == ItemStatus::Completed).count()
+        self.items
+            .iter()
+            .filter(|i| i.status == ItemStatus::Completed)
+            .count()
     }
 }
 

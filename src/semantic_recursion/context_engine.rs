@@ -59,11 +59,9 @@ impl SemanticContextEngine {
 
     /// Ingest a user request into the graph and vector store
     pub fn ingest_user_request(&mut self, text: &str) -> NodeId {
-        let node_id = self.graph.add_node(
-            NodeKind::UserRequest,
-            text.to_string(),
-            HashMap::new(),
-        );
+        let node_id = self
+            .graph
+            .add_node(NodeKind::UserRequest, text.to_string(), HashMap::new());
 
         let mut meta = HashMap::new();
         meta.insert("node_id".into(), node_id.to_string());
@@ -85,17 +83,17 @@ impl SemanticContextEngine {
             metadata.insert("model".into(), m.to_string());
         }
 
-        let node_id = self.graph.add_node(
-            NodeKind::LlmResponse,
-            text.to_string(),
-            metadata,
-        );
+        let node_id = self
+            .graph
+            .add_node(NodeKind::LlmResponse, text.to_string(), metadata);
 
         // Edge: response answers request
-        self.graph.add_edge(request_node, node_id, EdgeKind::RespondsTo, 1.0);
+        self.graph
+            .add_edge(request_node, node_id, EdgeKind::RespondsTo, 1.0);
 
         // Edge: follows in sequence
-        self.graph.add_edge(request_node, node_id, EdgeKind::FollowsInSequence, 1.0);
+        self.graph
+            .add_edge(request_node, node_id, EdgeKind::FollowsInSequence, 1.0);
 
         let mut meta = HashMap::new();
         meta.insert("node_id".into(), node_id.to_string());
@@ -125,9 +123,12 @@ impl SemanticContextEngine {
             HashMap::from([("tool".into(), tool_name.into())]),
         );
 
-        self.graph.add_edge(trigger_node, call_id, EdgeKind::TriggeredTool, 1.0);
-        self.graph.add_edge(result_id, trigger_node, EdgeKind::ProvidesData, 1.0);
-        self.graph.add_edge(call_id, result_id, EdgeKind::FollowsInSequence, 1.0);
+        self.graph
+            .add_edge(trigger_node, call_id, EdgeKind::TriggeredTool, 1.0);
+        self.graph
+            .add_edge(result_id, trigger_node, EdgeKind::ProvidesData, 1.0);
+        self.graph
+            .add_edge(call_id, result_id, EdgeKind::FollowsInSequence, 1.0);
 
         // Index tool result for search
         let mut meta = HashMap::new();
@@ -157,20 +158,13 @@ impl SemanticContextEngine {
     }
 
     /// Compact old nodes into a summary — nothing is deleted
-    pub fn compact(
-        &mut self,
-        node_ids: &[NodeId],
-        summary: &str,
-    ) -> NodeId {
+    pub fn compact(&mut self, node_ids: &[NodeId], summary: &str) -> NodeId {
         let summary_id = self.graph.compact_nodes(node_ids, summary.to_string());
 
         let mut meta = HashMap::new();
         meta.insert("node_id".into(), summary_id.to_string());
         meta.insert("kind".into(), "compaction_summary".into());
-        meta.insert(
-            "original_count".into(),
-            node_ids.len().to_string(),
-        );
+        meta.insert("original_count".into(), node_ids.len().to_string());
         self.vector_store.insert(summary, meta);
 
         summary_id
@@ -179,7 +173,8 @@ impl SemanticContextEngine {
     /// Retrieve relevant context for a query, building a context window
     pub fn retrieve(&mut self, query: &RetrievalQuery) -> ContextWindow {
         // 1. Score graph nodes by keyword relevance
-        let tokens: Vec<String> = self.tokenizer
+        let tokens: Vec<String> = self
+            .tokenizer
             .tokenize(&query.text)
             .tokens
             .iter()
@@ -212,7 +207,8 @@ impl SemanticContextEngine {
         // 4. If requested, include graph neighbors of top results
         if query.include_graph_neighbors {
             let top_ids: Vec<NodeId> = {
-                let mut scored: Vec<(NodeId, f32)> = candidates.iter().map(|(&k, &v)| (k, v)).collect();
+                let mut scored: Vec<(NodeId, f32)> =
+                    candidates.iter().map(|(&k, &v)| (k, v)).collect();
                 scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 scored.into_iter().take(5).map(|(id, _)| id).collect()
             };
@@ -305,7 +301,8 @@ impl SemanticContextEngine {
         };
         let kind = self.graph.get_node(node_id).unwrap().kind.clone();
 
-        let result = fragment::fragment_message(&content, &mut self.tokenizer, &self.fragment_config);
+        let result =
+            fragment::fragment_message(&content, &mut self.tokenizer, &self.fragment_config);
 
         if result.fragments.len() <= 1 {
             // Single fragment — symlink the whole node directly
@@ -322,12 +319,16 @@ impl SemanticContextEngine {
                 fragment.text.clone(),
                 HashMap::from([
                     ("parent_node".into(), node_id.to_string()),
-                    ("sentence_indices".into(), format!("{:?}", fragment.sentence_indices)),
+                    (
+                        "sentence_indices".into(),
+                        format!("{:?}", fragment.sentence_indices),
+                    ),
                 ]),
             );
 
             // Edge: fragment is derived from parent
-            self.graph.add_edge(node_id, frag_node, EdgeKind::DerivedFrom, 1.0);
+            self.graph
+                .add_edge(node_id, frag_node, EdgeKind::DerivedFrom, 1.0);
 
             // Index fragment in vector store
             let mut meta = HashMap::new();
@@ -337,7 +338,9 @@ impl SemanticContextEngine {
             self.vector_store.insert(&fragment.text, meta);
 
             // Create symlink for this fragment
-            let hash = self.symlinks.create(frag_node, &fragment.text, &fragment.summary);
+            let hash = self
+                .symlinks
+                .create(frag_node, &fragment.text, &fragment.summary);
             symlinked.push((hash, frag_node));
         }
 
@@ -363,7 +366,10 @@ impl SemanticContextEngine {
             if fragments.len() <= 1 {
                 // Single fragment — one symlink line
                 if let Some((hash, _)) = fragments.first() {
-                    let ref_line = self.symlinks.format_ref(hash).unwrap_or_else(|| text.clone());
+                    let ref_line = self
+                        .symlinks
+                        .format_ref(hash)
+                        .unwrap_or_else(|| text.clone());
                     symlinked_messages.push(ref_line.clone());
                     symlink_map.push(vec![hash.clone()]);
                 } else {
@@ -385,10 +391,7 @@ impl SemanticContextEngine {
             }
         }
 
-        let symlinked_tokens: usize = symlinked_messages
-            .iter()
-            .map(|s| (s.len() + 3) / 4)
-            .sum();
+        let symlinked_tokens: usize = symlinked_messages.iter().map(|s| s.len().div_ceil(4)).sum();
 
         SymlinkedContextWindow {
             original: window,
@@ -470,7 +473,10 @@ pub struct SymlinkedContextWindow {
 
 impl SymlinkedContextWindow {
     fn compute_savings(mut self) -> Self {
-        self.tokens_saved = self.original.total_tokens.saturating_sub(self.symlinked_tokens);
+        self.tokens_saved = self
+            .original
+            .total_tokens
+            .saturating_sub(self.symlinked_tokens);
         self
     }
 }
@@ -802,7 +808,10 @@ mod tests {
         // Symlinked form should be significantly smaller for long messages
         assert!(symlinked.symlinked_tokens < symlinked.original.total_tokens);
         // Symlink map should have entries for each message
-        assert_eq!(symlinked.symlink_map.len(), symlinked.original.messages.len());
+        assert_eq!(
+            symlinked.symlink_map.len(),
+            symlinked.original.messages.len()
+        );
         // Each message should have at least one symlink hash
         for hashes in &symlinked.symlink_map {
             assert!(!hashes.is_empty());
