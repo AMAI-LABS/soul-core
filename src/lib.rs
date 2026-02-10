@@ -16,6 +16,8 @@ pub mod hook;
 pub mod subagent;
 pub mod memory;
 pub mod error;
+pub mod rlm;
+pub mod semantic_recursion;
 
 pub use types::*;
 pub use error::SoulError;
