@@ -61,6 +61,71 @@ pub struct ProbeResult {
     pub rate_limit_utilization: Option<f64>,
 }
 
+/// Configuration for routing provider requests through a transparent proxy.
+///
+/// In WASM browser environments, direct API calls face CORS restrictions.
+/// A transparent proxy deployment forwards requests to the real API endpoint
+/// while being served from the same origin as the WASM app.
+///
+/// # Example
+///
+/// ```rust
+/// use soul_core::provider::{ProxyConfig, AnthropicProvider, OpenAIProvider};
+///
+/// // Deploy a transparent proxy at your app's origin
+/// let proxy = ProxyConfig::new("https://your-app.example.com/api");
+///
+/// // Create providers that route through the proxy
+/// let anthropic = AnthropicProvider::with_base_url(proxy.anthropic_url());
+/// let openai = OpenAIProvider::with_base_url(proxy.openai_url());
+/// ```
+#[derive(Debug, Clone)]
+pub struct ProxyConfig {
+    /// Base URL of the transparent proxy (e.g. "https://proxy.example.com")
+    pub base_url: String,
+    /// Path prefix for Anthropic routes (default: "/anthropic")
+    pub anthropic_prefix: String,
+    /// Path prefix for OpenAI routes (default: "/openai")
+    pub openai_prefix: String,
+}
+
+impl ProxyConfig {
+    /// Create a proxy config with default path prefixes.
+    ///
+    /// The proxy is expected to forward:
+    /// - `{base_url}/anthropic/v1/messages` → `https://api.anthropic.com/v1/messages`
+    /// - `{base_url}/openai/v1/chat/completions` → `https://api.openai.com/v1/chat/completions`
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            anthropic_prefix: "/anthropic".into(),
+            openai_prefix: "/openai".into(),
+        }
+    }
+
+    /// Create a passthrough proxy config where the proxy handles all routes directly.
+    ///
+    /// Use this when the proxy is a direct stand-in for a single API
+    /// (e.g. mock-llm-service's transparent proxy mode).
+    pub fn passthrough(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            anthropic_prefix: String::new(),
+            openai_prefix: String::new(),
+        }
+    }
+
+    /// Get the base URL for Anthropic API calls through the proxy.
+    pub fn anthropic_url(&self) -> String {
+        format!("{}{}", self.base_url, self.anthropic_prefix)
+    }
+
+    /// Get the base URL for OpenAI API calls through the proxy.
+    pub fn openai_url(&self) -> String {
+        format!("{}{}", self.base_url, self.openai_prefix)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,5 +145,26 @@ mod tests {
     #[test]
     fn provider_is_object_safe() {
         fn _assert_object_safe(_: &dyn Provider) {}
+    }
+
+    #[test]
+    fn proxy_config_default_prefixes() {
+        let proxy = ProxyConfig::new("https://proxy.example.com");
+        assert_eq!(proxy.anthropic_url(), "https://proxy.example.com/anthropic");
+        assert_eq!(proxy.openai_url(), "https://proxy.example.com/openai");
+    }
+
+    #[test]
+    fn proxy_config_passthrough() {
+        let proxy = ProxyConfig::passthrough("http://localhost:8081");
+        assert_eq!(proxy.anthropic_url(), "http://localhost:8081");
+        assert_eq!(proxy.openai_url(), "http://localhost:8081");
+    }
+
+    #[test]
+    fn proxy_config_trailing_slash_preserved() {
+        let proxy = ProxyConfig::new("https://api.example.com/");
+        // Caller is responsible for base_url format
+        assert_eq!(proxy.anthropic_url(), "https://api.example.com//anthropic");
     }
 }

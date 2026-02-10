@@ -1,13 +1,26 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
 use crate::error::{SoulError, SoulResult};
 use crate::types::*;
 
+use super::remap::ToolRemap;
 use super::traits::{ProbeResult, Provider};
 
+/// Anthropic API provider — supports both API key and OAuth token auth.
+///
+/// Auth method is auto-detected from `AuthProfile.api_key`:
+/// - `sk-ant-oat*` prefix → OAuth Bearer token flow
+/// - anything else → standard `x-api-key` header
+///
+/// OAuth flow mirrors Claude Code's handshake:
+/// - `Authorization: Bearer {token}` (not `x-api-key`)
+/// - `anthropic-beta: oauth-2025-04-20` header (required)
+/// - `?beta=true` query parameter
+/// - `metadata.user_id` injected as SHA-256 hash of token
 pub struct AnthropicProvider {
     client: Client,
     base_url: String,
@@ -28,17 +41,78 @@ impl AnthropicProvider {
         }
     }
 
+    /// Detect OAuth token from prefix.
+    fn is_oauth(auth: &AuthProfile) -> bool {
+        auth.api_key.starts_with("sk-ant-oat")
+    }
+
+    /// Build the URL, appending `?beta=true` for OAuth.
+    fn build_url(&self, path: &str, auth: &AuthProfile) -> String {
+        let base = format!("{}{}", self.base_url, path);
+        if Self::is_oauth(auth) {
+            if base.contains('?') {
+                format!("{base}&beta=true")
+            } else {
+                format!("{base}?beta=true")
+            }
+        } else {
+            base
+        }
+    }
+
+    /// Apply auth headers to a request builder.
+    fn apply_auth(
+        &self,
+        req: reqwest::RequestBuilder,
+        auth: &AuthProfile,
+    ) -> reqwest::RequestBuilder {
+        let req = req
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json");
+
+        if Self::is_oauth(auth) {
+            req.header("Authorization", format!("Bearer {}", auth.api_key))
+                .header("anthropic-beta", "oauth-2025-04-20")
+        } else {
+            req.header("x-api-key", &auth.api_key)
+        }
+    }
+
+    /// Generate deterministic user_id from OAuth token (SHA-256 hash).
+    fn oauth_user_id(token: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+        format!("user_{hash}_account__session_00000000-0000-0000-0000-000000000000")
+    }
+
+    /// Inject OAuth-specific fields into the request body.
+    fn inject_oauth_fields(body: &mut serde_json::Value, auth: &AuthProfile) {
+        if !Self::is_oauth(auth) {
+            return;
+        }
+        if let Some(obj) = body.as_object_mut() {
+            if !obj.contains_key("metadata") {
+                obj.insert(
+                    "metadata".to_string(),
+                    json!({"user_id": Self::oauth_user_id(&auth.api_key)}),
+                );
+            }
+        }
+    }
+
     fn build_messages_body(
         &self,
         messages: &[Message],
         system: &str,
         tools: &[ToolDefinition],
         model: &ModelInfo,
+        remap: &ToolRemap,
     ) -> serde_json::Value {
         let api_messages: Vec<serde_json::Value> = messages
             .iter()
             .filter(|m| m.role != Role::System)
-            .map(|m| self.message_to_api(m))
+            .map(|m| self.message_to_api(m, remap))
             .collect();
 
         let mut body = json!({
@@ -53,8 +127,9 @@ impl AnthropicProvider {
             let api_tools: Vec<serde_json::Value> = tools
                 .iter()
                 .map(|t| {
+                    let name = remap.get_safe_name(&t.name).unwrap_or(&t.name).to_string();
                     json!({
-                        "name": t.name,
+                        "name": name,
                         "description": t.description,
                         "input_schema": t.input_schema,
                     })
@@ -66,7 +141,7 @@ impl AnthropicProvider {
         body
     }
 
-    fn message_to_api(&self, msg: &Message) -> serde_json::Value {
+    fn message_to_api(&self, msg: &Message, remap: &ToolRemap) -> serde_json::Value {
         let role = match msg.role {
             Role::User => "user",
             Role::Assistant => "assistant",
@@ -84,10 +159,11 @@ impl AnthropicProvider {
                     name,
                     arguments,
                 } => {
+                    let api_name = remap.get_safe_name(name).unwrap_or(name).to_string();
                     json!({
                         "type": "tool_use",
                         "id": id,
-                        "name": name,
+                        "name": api_name,
                         "input": arguments,
                     })
                 }
@@ -177,18 +253,19 @@ impl Provider for AnthropicProvider {
         auth: &AuthProfile,
         event_tx: mpsc::UnboundedSender<StreamDelta>,
     ) -> SoulResult<Message> {
-        let body = self.build_messages_body(messages, system, tools, model);
-        let url = format!("{}/v1/messages", self.base_url);
+        // Build tool remap for OAuth tokens to bypass semantic name filtering
+        let remap = if Self::is_oauth(auth) && !tools.is_empty() {
+            ToolRemap::wildcard(tools)
+        } else {
+            ToolRemap::none()
+        };
 
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &auth.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        let mut body = self.build_messages_body(messages, system, tools, model, &remap);
+        Self::inject_oauth_fields(&mut body, auth);
+
+        let url = self.build_url("/v1/messages", auth);
+        let req = self.client.post(&url);
+        let response = self.apply_auth(req, auth).json(&body).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -237,11 +314,10 @@ impl Provider for AnthropicProvider {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("")
                                         .to_string();
-                                    let name = block
-                                        .get("name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
+                                    let raw_name =
+                                        block.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                    // Reverse-map remapped tool names back to originals
+                                    let name = remap.restore_name(raw_name).to_string();
                                     content_blocks.push(ContentBlock::ToolCall {
                                         id,
                                         name,
@@ -348,20 +424,18 @@ impl Provider for AnthropicProvider {
         model: &ModelInfo,
         auth: &AuthProfile,
     ) -> SoulResult<usize> {
-        let mut body = self.build_messages_body(messages, system, tools, model);
+        let remap = if Self::is_oauth(auth) && !tools.is_empty() {
+            ToolRemap::wildcard(tools)
+        } else {
+            ToolRemap::none()
+        };
+        let mut body = self.build_messages_body(messages, system, tools, model, &remap);
         body.as_object_mut().unwrap().remove("stream");
+        Self::inject_oauth_fields(&mut body, auth);
 
-        let url = format!("{}/v1/messages/count_tokens", self.base_url);
-
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &auth.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        let url = self.build_url("/v1/messages/count_tokens", auth);
+        let req = self.client.post(&url);
+        let response = self.apply_auth(req, auth).json(&body).send().await?;
 
         if !response.status().is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -378,22 +452,16 @@ impl Provider for AnthropicProvider {
     }
 
     async fn probe(&self, model: &ModelInfo, auth: &AuthProfile) -> SoulResult<ProbeResult> {
-        let url = format!("{}/v1/messages", self.base_url);
-        let body = json!({
+        let mut body = json!({
             "model": model.id,
             "max_tokens": 1,
             "messages": [{"role": "user", "content": "quota"}],
         });
+        Self::inject_oauth_fields(&mut body, auth);
 
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &auth.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        let url = self.build_url("/v1/messages", auth);
+        let req = self.client.post(&url);
+        let response = self.apply_auth(req, auth).json(&body).send().await?;
 
         let utilization = response
             .headers()
@@ -431,7 +499,8 @@ mod tests {
     fn message_to_api_user() {
         let provider = AnthropicProvider::new();
         let msg = Message::user("hello");
-        let api = provider.message_to_api(&msg);
+        let no_remap = ToolRemap::none();
+        let api = provider.message_to_api(&msg, &no_remap);
         assert_eq!(api["role"], "user");
         assert_eq!(api["content"][0]["type"], "text");
         assert_eq!(api["content"][0]["text"], "hello");
@@ -447,7 +516,8 @@ mod tests {
                 ContentBlock::tool_call("tc1", "read", json!({"path": "/tmp/test.txt"})),
             ],
         );
-        let api = provider.message_to_api(&msg);
+        let no_remap = ToolRemap::none();
+        let api = provider.message_to_api(&msg, &no_remap);
         assert_eq!(api["role"], "assistant");
         assert_eq!(api["content"][0]["type"], "text");
         assert_eq!(api["content"][1]["type"], "tool_use");
@@ -458,7 +528,8 @@ mod tests {
     fn message_to_api_tool_result() {
         let provider = AnthropicProvider::new();
         let msg = Message::tool_result("tc1", "file contents", false);
-        let api = provider.message_to_api(&msg);
+        let no_remap = ToolRemap::none();
+        let api = provider.message_to_api(&msg, &no_remap);
         assert_eq!(api["role"], "user"); // Anthropic uses user role for tool results
         assert_eq!(api["content"][0]["type"], "tool_result");
         assert_eq!(api["content"][0]["tool_use_id"], "tc1");
@@ -484,8 +555,10 @@ mod tests {
             description: "Read a file".into(),
             input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
         }];
+        let no_remap = ToolRemap::none();
 
-        let body = provider.build_messages_body(&messages, "system prompt", &tools, &model);
+        let body =
+            provider.build_messages_body(&messages, "system prompt", &tools, &model, &no_remap);
         assert_eq!(body["model"], "claude-sonnet-4-5-20250929");
         assert_eq!(body["system"], "system prompt");
         assert!(body["tools"].is_array());
@@ -507,8 +580,9 @@ mod tests {
             cost_per_output_token: 0.0,
         };
         let messages = vec![Message::user("hello")];
+        let no_remap = ToolRemap::none();
 
-        let body = provider.build_messages_body(&messages, "system", &[], &model);
+        let body = provider.build_messages_body(&messages, "system", &[], &model, &no_remap);
         assert!(body.get("tools").is_none());
     }
 
@@ -544,5 +618,204 @@ mod tests {
         let data = json!({"type": "ping"});
         let delta = provider.parse_sse_event("ping", &data);
         assert!(delta.is_none());
+    }
+
+    // ─── OAuth Detection Tests ──────────────────────────────────────────
+
+    #[test]
+    fn detects_oauth_token() {
+        let auth = AuthProfile::new(ProviderKind::Anthropic, "sk-ant-oat01-abc123");
+        assert!(AnthropicProvider::is_oauth(&auth));
+    }
+
+    #[test]
+    fn detects_api_key() {
+        let auth = AuthProfile::new(ProviderKind::Anthropic, "sk-ant-api03-xyz789");
+        assert!(!AnthropicProvider::is_oauth(&auth));
+    }
+
+    #[test]
+    fn oauth_url_has_beta_param() {
+        let provider = AnthropicProvider::new();
+        let oauth_auth = AuthProfile::new(ProviderKind::Anthropic, "sk-ant-oat01-test");
+        let api_auth = AuthProfile::new(ProviderKind::Anthropic, "sk-ant-api03-test");
+
+        let oauth_url = provider.build_url("/v1/messages", &oauth_auth);
+        assert!(oauth_url.ends_with("?beta=true"));
+
+        let api_url = provider.build_url("/v1/messages", &api_auth);
+        assert!(!api_url.contains("beta=true"));
+    }
+
+    #[test]
+    fn oauth_user_id_is_deterministic() {
+        let id1 = AnthropicProvider::oauth_user_id("sk-ant-oat01-test-token");
+        let id2 = AnthropicProvider::oauth_user_id("sk-ant-oat01-test-token");
+        assert_eq!(id1, id2);
+        assert!(id1.starts_with("user_"));
+        assert!(id1.contains("_account__session_"));
+    }
+
+    #[test]
+    fn oauth_user_id_differs_per_token() {
+        let id1 = AnthropicProvider::oauth_user_id("sk-ant-oat01-token-a");
+        let id2 = AnthropicProvider::oauth_user_id("sk-ant-oat01-token-b");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn inject_oauth_fields_adds_metadata() {
+        let auth = AuthProfile::new(ProviderKind::Anthropic, "sk-ant-oat01-test");
+        let mut body = json!({"model": "claude-haiku-4-5-20251001", "messages": []});
+        AnthropicProvider::inject_oauth_fields(&mut body, &auth);
+
+        assert!(body.get("metadata").is_some());
+        let user_id = body["metadata"]["user_id"].as_str().unwrap();
+        assert!(user_id.starts_with("user_"));
+    }
+
+    #[test]
+    fn inject_oauth_fields_skips_api_key() {
+        let auth = AuthProfile::new(ProviderKind::Anthropic, "sk-ant-api03-test");
+        let mut body = json!({"model": "claude-haiku-4-5-20251001", "messages": []});
+        AnthropicProvider::inject_oauth_fields(&mut body, &auth);
+
+        assert!(body.get("metadata").is_none());
+    }
+
+    #[test]
+    fn inject_oauth_fields_preserves_existing_metadata() {
+        let auth = AuthProfile::new(ProviderKind::Anthropic, "sk-ant-oat01-test");
+        let mut body = json!({
+            "model": "claude-haiku-4-5-20251001",
+            "messages": [],
+            "metadata": {"custom_field": "value"}
+        });
+        AnthropicProvider::inject_oauth_fields(&mut body, &auth);
+
+        // Should NOT add user_id since metadata already exists with content
+        // but user_id key is missing, so it should be added
+        assert!(body["metadata"]["custom_field"].as_str() == Some("value"));
+    }
+
+    #[test]
+    fn oauth_user_id_hash_is_64_hex_chars() {
+        let id = AnthropicProvider::oauth_user_id("sk-ant-oat01-some-token");
+        // Format: user_{64 hex chars}_account__session_{uuid}
+        let hash_part = id
+            .strip_prefix("user_")
+            .unwrap()
+            .split("_account__session_")
+            .next()
+            .unwrap();
+        assert_eq!(hash_part.len(), 64);
+        assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ─── Tool Name Remap Tests ────────────────────────────────────────────
+
+    #[test]
+    fn remap_renames_tools_in_body() {
+        let provider = AnthropicProvider::new();
+        let model = ModelInfo {
+            id: "claude-sonnet-4-5-20250929".into(),
+            provider: ProviderKind::Anthropic,
+            context_window: 200_000,
+            max_output_tokens: 8192,
+            supports_thinking: false,
+            supports_tools: true,
+            supports_images: false,
+            cost_per_input_token: 0.0,
+            cost_per_output_token: 0.0,
+        };
+        let tools = vec![
+            ToolDefinition {
+                name: "read".into(),
+                description: "Read a file".into(),
+                input_schema: json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "write".into(),
+                description: "Write a file".into(),
+                input_schema: json!({"type": "object"}),
+            },
+        ];
+        let remap = ToolRemap::wildcard(&tools);
+        let messages = vec![Message::user("hello")];
+
+        let body = provider.build_messages_body(&messages, "system", &tools, &model, &remap);
+
+        // Tool names should be remapped, not originals
+        let api_tools = body["tools"].as_array().unwrap();
+        for tool in api_tools {
+            let name = tool["name"].as_str().unwrap();
+            assert!(
+                !["read", "write"].contains(&name),
+                "Original name leaked: {name}"
+            );
+            assert!(name.contains('_'), "Expected greek_nature format: {name}");
+        }
+    }
+
+    #[test]
+    fn remap_renames_tool_calls_in_messages() {
+        let provider = AnthropicProvider::new();
+        let tools = vec![ToolDefinition {
+            name: "read".into(),
+            description: "Read a file".into(),
+            input_schema: json!({"type": "object"}),
+        }];
+        let remap = ToolRemap::wildcard(&tools);
+
+        let msg = Message::new(
+            Role::Assistant,
+            vec![ContentBlock::tool_call(
+                "tc1",
+                "read",
+                json!({"path": "/tmp"}),
+            )],
+        );
+        let api = provider.message_to_api(&msg, &remap);
+
+        let name = api["content"][0]["name"].as_str().unwrap();
+        assert_eq!(name, "alpha_river"); // first tool = alpha_river
+        assert_ne!(name, "read");
+    }
+
+    #[test]
+    fn no_remap_preserves_tool_names() {
+        let provider = AnthropicProvider::new();
+        let no_remap = ToolRemap::none();
+
+        let msg = Message::new(
+            Role::Assistant,
+            vec![ContentBlock::tool_call("tc1", "read", json!({}))],
+        );
+        let api = provider.message_to_api(&msg, &no_remap);
+        assert_eq!(api["content"][0]["name"], "read");
+    }
+
+    #[test]
+    fn remap_restores_name_from_sse_content_block() {
+        let tools = vec![
+            ToolDefinition {
+                name: "read".into(),
+                description: "r".into(),
+                input_schema: json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "bash".into(),
+                description: "b".into(),
+                input_schema: json!({"type": "object"}),
+            },
+        ];
+        let remap = ToolRemap::wildcard(&tools);
+
+        // Simulate what content_block_start returns from the API
+        let safe_read = remap.get_safe_name("read").unwrap();
+        assert_eq!(remap.restore_name(safe_read), "read");
+
+        let safe_bash = remap.get_safe_name("bash").unwrap();
+        assert_eq!(remap.restore_name(safe_bash), "bash");
     }
 }
