@@ -53,6 +53,7 @@ let messages = agent.run(options, event_tx, steering_rx).await?;
 | `vfs` | Virtual filesystem: MemoryFs (WASM/tests), NativeFs (OS) |
 | `vexec` | Virtual executor: MockExecutor (WASM/tests), NativeExecutor (OS) |
 | `planner` | Task graph with dependencies, status tracking, timing, and display rendering |
+| `snapshot` | Generic versioned snapshot log — append-only JSONL history with rollback |
 | `soullog` | Multi-sink structured logging |
 | `subagent` | Subagent spawner for parallel task delegation |
 | `semantic_recursion` | Context graph, TF-IDF search, symlinks, semantic fragmentation |
@@ -231,7 +232,7 @@ soul-core = { version = "0.7", default-features = false }
 ## Testing
 
 ```bash
-cargo test                           # 598 tests (579 unit + 14 integration + 5 doc)
+cargo test                           # 648 tests (628 unit + 14 integration + 6 doc)
 cargo test --no-default-features     # verify non-native builds
 cargo clippy -- -D warnings          # lint
 cargo fmt --check                    # format check

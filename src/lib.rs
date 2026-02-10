@@ -83,6 +83,7 @@ pub mod rlm;
 pub mod semantic_recursion;
 pub mod session;
 pub mod skill;
+pub mod snapshot;
 pub mod soullog;
 pub mod subagent;
 pub mod tool;

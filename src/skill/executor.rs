@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-
 use super::SkillDefinition;
 use crate::error::{SoulError, SoulResult};
 use crate::tool::ToolOutput;
