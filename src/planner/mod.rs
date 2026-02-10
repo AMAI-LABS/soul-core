@@ -93,6 +93,22 @@ pub struct PlanTask {
     /// Creation order for stable display.
     #[serde(default)]
     pub order: u64,
+    /// Current attempt number (1-indexed, incremented on retry).
+    #[serde(default = "default_attempt")]
+    pub attempt: u32,
+    /// Max retries before permanent failure (0 = no retry).
+    #[serde(default)]
+    pub max_retries: u32,
+    /// Error from the last failed attempt.
+    #[serde(default)]
+    pub last_error: Option<String>,
+    /// Checkpoint: partial or final output from execution.
+    #[serde(default)]
+    pub output: Option<String>,
+}
+
+fn default_attempt() -> u32 {
+    1
 }
 
 impl PlanTask {
@@ -108,7 +124,16 @@ impl PlanTask {
             metadata: HashMap::new(),
             elapsed_ms: 0,
             order: id,
+            attempt: 1,
+            max_retries: 0,
+            last_error: None,
+            output: None,
         }
+    }
+
+    /// Whether this task can be retried (has retries left).
+    pub fn can_retry(&self) -> bool {
+        self.status == TaskStatus::Failed && self.attempt <= self.max_retries
     }
 
     /// Whether all blockers are in terminal state.
@@ -387,6 +412,112 @@ impl Planner {
         Ok(())
     }
 
+    /// Fail a task with an error message.
+    pub fn fail_with_error(&mut self, id: TaskId, error: impl Into<String>) -> SoulResult<()> {
+        let error_msg = error.into();
+        self.finish_task(id, TaskStatus::Failed)?;
+        if let Some(task) = self.tasks.get_mut(&id) {
+            task.last_error = Some(error_msg);
+        }
+        Ok(())
+    }
+
+    /// Retry a failed task — reset to pending, increment attempt counter.
+    ///
+    /// Returns `Err` if the task doesn't exist, isn't failed, or has exhausted retries.
+    pub fn retry(&mut self, id: TaskId) -> SoulResult<()> {
+        let task = self
+            .tasks
+            .get_mut(&id)
+            .ok_or_else(|| SoulError::Other(anyhow::anyhow!("Task #{id} not found")))?;
+
+        if task.status != TaskStatus::Failed {
+            return Err(SoulError::Other(anyhow::anyhow!(
+                "Task #{id} is {:?}, can only retry failed tasks",
+                task.status
+            )));
+        }
+        if task.attempt > task.max_retries {
+            return Err(SoulError::Other(anyhow::anyhow!(
+                "Task #{id} exhausted retries ({}/{})",
+                task.attempt,
+                task.max_retries
+            )));
+        }
+
+        task.attempt += 1;
+        task.status = TaskStatus::Pending;
+        // Keep last_error and output for context — don't clear them
+        Ok(())
+    }
+
+    /// Auto-retry all failed tasks that have retries remaining.
+    /// Returns the IDs of tasks that were retried.
+    pub fn retry_all(&mut self) -> Vec<TaskId> {
+        let retryable: Vec<TaskId> = self
+            .tasks
+            .values()
+            .filter(|t| t.can_retry())
+            .map(|t| t.id)
+            .collect();
+
+        let mut retried = Vec::new();
+        for id in retryable {
+            if self.retry(id).is_ok() {
+                retried.push(id);
+            }
+        }
+        retried
+    }
+
+    /// Resume after interruption (crash, laptop close, process kill).
+    ///
+    /// All `InProgress` tasks are reset to `Pending` so they can be re-executed.
+    /// Elapsed time is preserved. Returns the IDs of tasks that were reset.
+    pub fn resume(&mut self) -> Vec<TaskId> {
+        let in_flight: Vec<TaskId> = self
+            .tasks
+            .values()
+            .filter(|t| t.status == TaskStatus::InProgress)
+            .map(|t| t.id)
+            .collect();
+
+        for &id in &in_flight {
+            if let Some(task) = self.tasks.get_mut(&id) {
+                task.status = TaskStatus::Pending;
+                task.attempt += 1;
+                // Flush any live timer into elapsed_ms
+                if let Some(start) = self.start_times.remove(&id) {
+                    task.elapsed_ms += start.elapsed().as_millis() as u64;
+                }
+            }
+        }
+        in_flight
+    }
+
+    /// Store a checkpoint (partial or final output) on a task.
+    ///
+    /// Survives serialization — if the process dies, the last checkpoint
+    /// is available after `from_snapshot()` + `resume()`.
+    pub fn checkpoint(&mut self, id: TaskId, output: impl Into<String>) -> SoulResult<()> {
+        let task = self
+            .tasks
+            .get_mut(&id)
+            .ok_or_else(|| SoulError::Other(anyhow::anyhow!("Task #{id} not found")))?;
+        task.output = Some(output.into());
+        Ok(())
+    }
+
+    /// Set the max retry count for a task.
+    pub fn set_max_retries(&mut self, id: TaskId, max_retries: u32) -> SoulResult<()> {
+        let task = self
+            .tasks
+            .get_mut(&id)
+            .ok_or_else(|| SoulError::Other(anyhow::anyhow!("Task #{id} not found")))?;
+        task.max_retries = max_retries;
+        Ok(())
+    }
+
     /// Check if a task is ready to start (all dependencies completed).
     pub fn is_ready(&self, id: TaskId) -> bool {
         self.tasks
@@ -622,6 +753,15 @@ impl Planner {
                 if !task.status.is_terminal() {
                     line.push_str(&format!(" › {annotation}"));
                 }
+            }
+
+            // Add retry annotation for failed tasks
+            if task.status == TaskStatus::Failed && task.max_retries > 0 {
+                line.push_str(&format!(
+                    " (attempt {}/{})",
+                    task.attempt,
+                    task.max_retries + 1
+                ));
             }
 
             // Add elapsed time for completed tasks
@@ -1457,5 +1597,270 @@ mod tests {
 
         let output = planner.render();
         assert!(!output.contains("open question"));
+    }
+
+    // ─── Retry ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn retry_failed_task() {
+        let mut planner = Planner::new();
+        let id = planner.add_task("Flaky deploy", None::<String>);
+        planner.set_max_retries(id, 2).unwrap();
+
+        planner.start(id).unwrap();
+        planner.fail(id).unwrap();
+        assert_eq!(planner.get(id).unwrap().attempt, 1);
+
+        planner.retry(id).unwrap();
+        let task = planner.get(id).unwrap();
+        assert_eq!(task.status, TaskStatus::Pending);
+        assert_eq!(task.attempt, 2);
+    }
+
+    #[test]
+    fn retry_exhausted() {
+        let mut planner = Planner::new();
+        let id = planner.add_task("Flaky", None::<String>);
+        planner.set_max_retries(id, 1).unwrap();
+
+        // Attempt 1: fail
+        planner.start(id).unwrap();
+        planner.fail(id).unwrap();
+        // Retry → attempt 2
+        planner.retry(id).unwrap();
+        planner.start(id).unwrap();
+        planner.fail(id).unwrap();
+        // No more retries (attempt 2 > max_retries 1)
+        assert!(planner.retry(id).is_err());
+    }
+
+    #[test]
+    fn retry_non_failed_task_fails() {
+        let mut planner = Planner::new();
+        let id = planner.add_task("Task", None::<String>);
+        planner.set_max_retries(id, 3).unwrap();
+        assert!(planner.retry(id).is_err()); // pending, not failed
+    }
+
+    #[test]
+    fn retry_without_max_retries_fails() {
+        let mut planner = Planner::new();
+        let id = planner.add_task("Task", None::<String>);
+        // max_retries defaults to 0
+        planner.start(id).unwrap();
+        planner.fail(id).unwrap();
+        assert!(planner.retry(id).is_err());
+    }
+
+    #[test]
+    fn can_retry_check() {
+        let mut planner = Planner::new();
+        let id = planner.add_task("Task", None::<String>);
+        planner.set_max_retries(id, 1).unwrap();
+
+        assert!(!planner.get(id).unwrap().can_retry()); // pending
+        planner.start(id).unwrap();
+        planner.fail(id).unwrap();
+        assert!(planner.get(id).unwrap().can_retry()); // failed, attempt 1 <= max 1
+    }
+
+    #[test]
+    fn retry_all_retries_eligible() {
+        let mut planner = Planner::new();
+        let t1 = planner.add_task("A", None::<String>);
+        let t2 = planner.add_task("B", None::<String>);
+        let t3 = planner.add_task("C", None::<String>);
+
+        planner.set_max_retries(t1, 2).unwrap();
+        planner.set_max_retries(t2, 0).unwrap(); // no retry
+        planner.set_max_retries(t3, 1).unwrap();
+
+        planner.start(t1).unwrap();
+        planner.fail(t1).unwrap();
+        planner.start(t2).unwrap();
+        planner.fail(t2).unwrap();
+        planner.start(t3).unwrap();
+        planner.fail(t3).unwrap();
+
+        let retried = planner.retry_all();
+        assert_eq!(retried.len(), 2); // t1 and t3
+        assert!(retried.contains(&t1));
+        assert!(retried.contains(&t3));
+        assert_eq!(planner.get(t2).unwrap().status, TaskStatus::Failed); // stayed failed
+    }
+
+    #[test]
+    fn fail_with_error_records_message() {
+        let mut planner = Planner::new();
+        let id = planner.add_task("Deploy", None::<String>);
+        planner.start(id).unwrap();
+        planner
+            .fail_with_error(id, "Connection refused on port 443")
+            .unwrap();
+
+        let task = planner.get(id).unwrap();
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(
+            task.last_error.as_deref(),
+            Some("Connection refused on port 443")
+        );
+    }
+
+    #[test]
+    fn retry_preserves_last_error() {
+        let mut planner = Planner::new();
+        let id = planner.add_task("Deploy", None::<String>);
+        planner.set_max_retries(id, 1).unwrap();
+        planner.start(id).unwrap();
+        planner.fail_with_error(id, "timeout").unwrap();
+        planner.retry(id).unwrap();
+
+        // Error from previous attempt is preserved for context
+        assert_eq!(
+            planner.get(id).unwrap().last_error.as_deref(),
+            Some("timeout")
+        );
+    }
+
+    // ─── Resume ────────────────────────────────────────────────────────
+
+    #[test]
+    fn resume_resets_in_progress_to_pending() {
+        let mut planner = Planner::new();
+        let t1 = planner.add_task("A", None::<String>);
+        let t2 = planner.add_task("B", None::<String>);
+        let t3 = planner.add_task("C", None::<String>);
+
+        planner.start(t1).unwrap();
+        planner.complete(t1).unwrap();
+        planner.start(t2).unwrap(); // in progress when "crash" happens
+
+        let resumed = planner.resume();
+        assert_eq!(resumed, vec![t2]);
+        assert_eq!(planner.get(t1).unwrap().status, TaskStatus::Completed); // untouched
+        assert_eq!(planner.get(t2).unwrap().status, TaskStatus::Pending); // reset
+        assert_eq!(planner.get(t2).unwrap().attempt, 2); // incremented
+        assert_eq!(planner.get(t3).unwrap().status, TaskStatus::Pending); // untouched
+    }
+
+    #[test]
+    fn resume_no_in_progress_returns_empty() {
+        let mut planner = Planner::new();
+        planner.add_task("A", None::<String>);
+        let resumed = planner.resume();
+        assert!(resumed.is_empty());
+    }
+
+    #[test]
+    fn resume_after_snapshot_roundtrip() {
+        let mut planner = Planner::new();
+        let t1 = planner.add_task("Build", None::<String>);
+        let _t2 = planner.add_task("Test", None::<String>);
+        planner.start(t1).unwrap();
+
+        // Simulate crash: serialize, restore, resume
+        let json = planner.to_json().unwrap();
+        let mut restored = Planner::from_json(&json).unwrap();
+        let resumed = restored.resume();
+
+        assert_eq!(resumed, vec![t1]);
+        assert_eq!(restored.get(t1).unwrap().status, TaskStatus::Pending);
+        assert!(restored.is_ready(t1));
+    }
+
+    // ─── Checkpoint ────────────────────────────────────────────────────
+
+    #[test]
+    fn checkpoint_stores_output() {
+        let mut planner = Planner::new();
+        let id = planner.add_task("Generate code", None::<String>);
+        planner.start(id).unwrap();
+        planner
+            .checkpoint(id, "fn main() { /* partial */ }")
+            .unwrap();
+
+        assert_eq!(
+            planner.get(id).unwrap().output.as_deref(),
+            Some("fn main() { /* partial */ }")
+        );
+    }
+
+    #[test]
+    fn checkpoint_survives_snapshot() {
+        let mut planner = Planner::new();
+        let id = planner.add_task("Generate", None::<String>);
+        planner.start(id).unwrap();
+        planner.checkpoint(id, "partial output").unwrap();
+
+        let json = planner.to_json().unwrap();
+        let restored = Planner::from_json(&json).unwrap();
+        assert_eq!(
+            restored.get(id).unwrap().output.as_deref(),
+            Some("partial output")
+        );
+    }
+
+    #[test]
+    fn checkpoint_overwrites_previous() {
+        let mut planner = Planner::new();
+        let id = planner.add_task("Build", None::<String>);
+        planner.start(id).unwrap();
+        planner.checkpoint(id, "v1").unwrap();
+        planner.checkpoint(id, "v2").unwrap();
+        assert_eq!(planner.get(id).unwrap().output.as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn checkpoint_nonexistent_task_fails() {
+        let mut planner = Planner::new();
+        assert!(planner.checkpoint(999, "data").is_err());
+    }
+
+    #[test]
+    fn checkpoint_preserved_across_retry() {
+        let mut planner = Planner::new();
+        let id = planner.add_task("Deploy", None::<String>);
+        planner.set_max_retries(id, 1).unwrap();
+        planner.start(id).unwrap();
+        planner.checkpoint(id, "uploaded 3/5 files").unwrap();
+        planner.fail_with_error(id, "network error").unwrap();
+        planner.retry(id).unwrap();
+
+        // Both output and error preserved for the retry attempt
+        let task = planner.get(id).unwrap();
+        assert_eq!(task.output.as_deref(), Some("uploaded 3/5 files"));
+        assert_eq!(task.last_error.as_deref(), Some("network error"));
+        assert_eq!(task.status, TaskStatus::Pending);
+        assert_eq!(task.attempt, 2);
+    }
+
+    #[test]
+    fn render_shows_retry_count() {
+        let mut planner = Planner::new();
+        let id = planner.add_task("Flaky deploy", None::<String>);
+        planner.set_max_retries(id, 2).unwrap();
+        planner.start(id).unwrap();
+        planner.fail(id).unwrap();
+
+        let output = planner.render();
+        assert!(output.contains("(attempt 1/3)"));
+    }
+
+    // ─── Set Max Retries ───────────────────────────────────────────────
+
+    #[test]
+    fn set_max_retries() {
+        let mut planner = Planner::new();
+        let id = planner.add_task("Task", None::<String>);
+        assert_eq!(planner.get(id).unwrap().max_retries, 0);
+
+        planner.set_max_retries(id, 5).unwrap();
+        assert_eq!(planner.get(id).unwrap().max_retries, 5);
+    }
+
+    #[test]
+    fn set_max_retries_nonexistent_fails() {
+        let mut planner = Planner::new();
+        assert!(planner.set_max_retries(999, 3).is_err());
     }
 }
