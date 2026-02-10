@@ -2,7 +2,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::context::{ContextConfig, ContextManager};
+use crate::cost::budget::{BudgetEnforcer, BudgetStatus};
+use crate::cost::CostTracker;
 use crate::error::{SoulError, SoulResult};
+use crate::executor::ExecutorRegistry;
 use crate::hook::{BeforeAgentStartContext, BeforeToolCallContext, HookAction, HookPipeline};
 use crate::provider::Provider;
 use crate::tool::{ToolOutput, ToolRegistry};
@@ -15,6 +18,9 @@ pub struct AgentLoop {
     config: AgentConfig,
     hooks: HookPipeline,
     context_manager: ContextManager,
+    cost_tracker: Option<CostTracker>,
+    budget: Option<BudgetEnforcer>,
+    executor_registry: Option<ExecutorRegistry>,
 }
 
 /// Options for running the agent loop
@@ -38,11 +44,29 @@ impl AgentLoop {
             config,
             hooks: HookPipeline::new(),
             context_manager: ContextManager::new(context_config),
+            cost_tracker: None,
+            budget: None,
+            executor_registry: None,
         }
     }
 
     pub fn with_hooks(mut self, hooks: HookPipeline) -> Self {
         self.hooks = hooks;
+        self
+    }
+
+    pub fn with_cost_tracker(mut self, tracker: CostTracker) -> Self {
+        self.cost_tracker = Some(tracker);
+        self
+    }
+
+    pub fn with_budget(mut self, policy: crate::cost::BudgetPolicy) -> Self {
+        self.budget = Some(BudgetEnforcer::new(policy));
+        self
+    }
+
+    pub fn with_executor_registry(mut self, registry: ExecutorRegistry) -> Self {
+        self.executor_registry = Some(registry);
         self
     }
 
@@ -158,6 +182,62 @@ impl AgentLoop {
             delta_forwarder.await.ok();
             self.context_manager.reset_circuit_breaker();
 
+            // Record cost after LLM response
+            if let Some(ref cost_tracker) = self.cost_tracker {
+                let tool_names: Vec<String> = assistant_msg
+                    .tool_calls()
+                    .iter()
+                    .filter_map(|tc| {
+                        if let ContentBlock::ToolCall { name, .. } = tc {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                let usage = assistant_msg
+                    .usage
+                    .clone()
+                    .unwrap_or_else(|| TokenUsage::new(0, 0));
+                let cost_event = cost_tracker
+                    .record_turn(
+                        &self.config.model.id,
+                        &usage,
+                        &self.config.model,
+                        &tool_names,
+                    )
+                    .await;
+                let _ = event_tx.send(AgentEvent::Cost(cost_event));
+
+                // Check budget
+                if let Some(ref budget) = self.budget {
+                    let total_cost = cost_tracker.total_cost_usd().await;
+                    let total_tokens = cost_tracker.total_tokens().await;
+                    let total_turns = cost_tracker.total_turns().await;
+
+                    match budget.check(total_cost, total_tokens, total_turns) {
+                        BudgetStatus::Exceeded => {
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: format!("Budget exceeded: ${:.4} spent", total_cost),
+                            });
+                            return Err(SoulError::BudgetExceeded {
+                                message: format!(
+                                    "Budget exceeded: ${:.4} spent, {} tokens, {} turns",
+                                    total_cost, total_tokens, total_turns
+                                ),
+                            });
+                        }
+                        BudgetStatus::Warning => {
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: format!("Budget warning: ${:.4} spent", total_cost),
+                            });
+                        }
+                        BudgetStatus::Ok => {}
+                    }
+                }
+            }
+
             let _ = event_tx.send(AgentEvent::MessageEnd {
                 message: assistant_msg.clone(),
             });
@@ -205,7 +285,31 @@ impl AgentLoop {
                             tool_name: tool_name.clone(),
                         });
 
-                        let result = if let Some(tool) = self.tools.get(&tool_name) {
+                        let result = if let Some(ref exec_registry) = self.executor_registry {
+                            // Use executor registry path
+                            let (partial_tx, mut partial_rx) = mpsc::unbounded_channel();
+                            let event_tx_c = event_tx.clone();
+                            let tc_id = id.clone();
+                            let partial_forwarder = tokio::spawn(async move {
+                                while let Some(partial) = partial_rx.recv().await {
+                                    let _ = event_tx_c.send(AgentEvent::ToolExecutionUpdate {
+                                        tool_call_id: tc_id.clone(),
+                                        partial_result: partial,
+                                    });
+                                }
+                            });
+
+                            let output = exec_registry
+                                .execute(&tool_name, id, tool_args, Some(partial_tx))
+                                .await;
+                            partial_forwarder.await.ok();
+
+                            match output {
+                                Ok(output) => output,
+                                Err(e) => ToolOutput::error(format!("Tool error: {e}")),
+                            }
+                        } else if let Some(tool) = self.tools.get(&tool_name) {
+                            // Use direct tool registry path (backward compat)
                             let (partial_tx, mut partial_rx) = mpsc::unbounded_channel();
                             let event_tx_c = event_tx.clone();
                             let tc_id = id.clone();

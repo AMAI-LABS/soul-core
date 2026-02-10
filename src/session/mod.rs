@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::error::SoulResult;
 use crate::types::Message;
+use crate::vfs::VirtualFs;
 
 /// A persistent session — stores conversation transcript
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,50 +55,67 @@ impl Default for Session {
     }
 }
 
-/// JSONL-based session persistence
+/// JSONL-based session persistence — backed by VirtualFs.
 pub struct SessionStore {
-    base_dir: PathBuf,
+    fs: Arc<dyn VirtualFs>,
+    base_dir: String,
 }
 
 impl SessionStore {
-    pub fn new(base_dir: impl Into<PathBuf>) -> Self {
+    /// Create a session store with a virtual filesystem at a base directory path.
+    pub fn new(fs: Arc<dyn VirtualFs>, base_dir: impl Into<String>) -> Self {
         Self {
+            fs,
             base_dir: base_dir.into(),
         }
     }
 
-    fn session_path(&self, session_id: &str) -> PathBuf {
-        self.base_dir.join(format!("{session_id}.jsonl"))
+    /// Create a session store backed by the native filesystem.
+    #[cfg(feature = "native")]
+    pub fn native(base_dir: impl Into<std::path::PathBuf>) -> Self {
+        let path: std::path::PathBuf = base_dir.into();
+        let fs = Arc::new(crate::vfs::NativeFs::new(&path));
+        Self {
+            fs,
+            base_dir: String::new(), // NativeFs already roots at base_dir
+        }
     }
 
-    fn index_path(&self) -> PathBuf {
-        self.base_dir.join("sessions.json")
+    fn session_path(&self, session_id: &str) -> String {
+        if self.base_dir.is_empty() {
+            format!("{session_id}.jsonl")
+        } else {
+            format!("{}/{session_id}.jsonl", self.base_dir)
+        }
+    }
+
+    fn index_path(&self) -> String {
+        if self.base_dir.is_empty() {
+            "sessions.json".to_string()
+        } else {
+            format!("{}/sessions.json", self.base_dir)
+        }
     }
 
     /// Append a message to the session transcript (JSONL)
     pub async fn append_message(&self, session_id: &str, message: &Message) -> SoulResult<()> {
-        tokio::fs::create_dir_all(&self.base_dir).await?;
+        if !self.base_dir.is_empty() {
+            self.fs.create_dir_all(&self.base_dir).await?;
+        }
         let path = self.session_path(session_id);
         let line = serde_json::to_string(message)? + "\n";
-
-        use tokio::io::AsyncWriteExt;
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await?;
-        file.write_all(line.as_bytes()).await?;
+        self.fs.append(&path, &line).await?;
         Ok(())
     }
 
     /// Load all messages from a session transcript
     pub async fn load_messages(&self, session_id: &str) -> SoulResult<Vec<Message>> {
         let path = self.session_path(session_id);
-        if !path.exists() {
+        if !self.fs.exists(&path).await? {
             return Ok(Vec::new());
         }
 
-        let content = tokio::fs::read_to_string(&path).await?;
+        let content = self.fs.read_to_string(&path).await?;
         let messages: Vec<Message> = content
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -107,7 +126,9 @@ impl SessionStore {
 
     /// Save session metadata
     pub async fn save_session(&self, session: &Session) -> SoulResult<()> {
-        tokio::fs::create_dir_all(&self.base_dir).await?;
+        if !self.base_dir.is_empty() {
+            self.fs.create_dir_all(&self.base_dir).await?;
+        }
         let path = self.index_path();
 
         let mut sessions = self.load_sessions_index().await?;
@@ -121,7 +142,7 @@ impl SessionStore {
         });
 
         let json = serde_json::to_string_pretty(&sessions)?;
-        tokio::fs::write(&path, json).await?;
+        self.fs.write(&path, &json).await?;
         Ok(())
     }
 
@@ -133,29 +154,25 @@ impl SessionStore {
     /// Delete a session
     pub async fn delete_session(&self, session_id: &str) -> SoulResult<()> {
         let path = self.session_path(session_id);
-        if path.exists() {
-            tokio::fs::remove_file(&path).await?;
+        if self.fs.exists(&path).await? {
+            self.fs.remove_file(&path).await?;
         }
 
         let mut sessions = self.load_sessions_index().await?;
         sessions.retain(|s| s.id != session_id);
         let json = serde_json::to_string_pretty(&sessions)?;
-        tokio::fs::write(self.index_path(), json).await?;
+        self.fs.write(&self.index_path(), &json).await?;
         Ok(())
     }
 
     async fn load_sessions_index(&self) -> SoulResult<Vec<SessionIndex>> {
         let path = self.index_path();
-        if !path.exists() {
+        if !self.fs.exists(&path).await? {
             return Ok(Vec::new());
         }
-        let content = tokio::fs::read_to_string(&path).await?;
+        let content = self.fs.read_to_string(&path).await?;
         let sessions: Vec<SessionIndex> = serde_json::from_str(&content)?;
         Ok(sessions)
-    }
-
-    pub fn base_dir(&self) -> &Path {
-        &self.base_dir
     }
 }
 
@@ -195,6 +212,11 @@ impl Default for Lane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vfs::MemoryFs;
+
+    fn test_fs() -> Arc<dyn VirtualFs> {
+        Arc::new(MemoryFs::new())
+    }
 
     #[test]
     fn session_new() {
@@ -237,8 +259,8 @@ mod tests {
 
     #[tokio::test]
     async fn session_store_append_and_load() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore::new(dir.path());
+        let fs = test_fs();
+        let store = SessionStore::new(fs, "");
 
         let session = Session::new();
         let msg1 = Message::user("hello");
@@ -255,8 +277,8 @@ mod tests {
 
     #[tokio::test]
     async fn session_store_load_nonexistent() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore::new(dir.path());
+        let fs = test_fs();
+        let store = SessionStore::new(fs, "");
 
         let loaded = store.load_messages("nonexistent").await.unwrap();
         assert!(loaded.is_empty());
@@ -264,8 +286,8 @@ mod tests {
 
     #[tokio::test]
     async fn session_store_save_and_list() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore::new(dir.path());
+        let fs = test_fs();
+        let store = SessionStore::new(fs, "");
 
         let mut session1 = Session::new();
         session1.append(Message::user("hello"));
@@ -281,8 +303,8 @@ mod tests {
 
     #[tokio::test]
     async fn session_store_delete() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore::new(dir.path());
+        let fs = test_fs();
+        let store = SessionStore::new(fs, "");
 
         let session = Session::new();
         let msg = Message::user("hello");
@@ -296,6 +318,19 @@ mod tests {
 
         let list = store.list_sessions().await.unwrap();
         assert!(list.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_store_with_base_dir() {
+        let fs = test_fs();
+        let store = SessionStore::new(fs.clone(), "data/sessions");
+
+        let session = Session::new();
+        let msg = Message::user("hello");
+        store.append_message(&session.id, &msg).await.unwrap();
+
+        let loaded = store.load_messages(&session.id).await.unwrap();
+        assert_eq!(loaded.len(), 1);
     }
 
     #[tokio::test]

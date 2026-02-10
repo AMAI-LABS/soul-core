@@ -1,16 +1,23 @@
 [package]
 name = "soul-core"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2021"
-description = "Async agentic runtime for Rust — steerable agent loops, context management, multi-provider LLM abstraction"
+description = "Async agentic runtime for Rust — steerable agent loops, context management, multi-provider LLM abstraction, virtual filesystem, WASM-ready"
 license = "MIT"
 repository = "https://github.com/AMAI-LABS/soul-core"
-keywords = ["agent", "llm", "ai", "async", "streaming"]
+keywords = ["agent", "llm", "ai", "async", "wasm"]
 categories = ["asynchronous", "web-programming"]
 
+[features]
+default = ["native"]
+# Native OS support: real filesystem, real process execution, full tokio runtime
+native = ["tokio/full", "tokio/test-util", "reqwest/stream", "tracing-subscriber"]
+# WASM browser target: in-memory VFS, noop executor, fetch-based HTTP
+wasm = ["uuid/js", "reqwest/json", "getrandom/js"]
+
 [dependencies]
-# Async runtime
-tokio = { version = "1", features = ["full"] }
+# Async runtime — minimal features; native adds full runtime
+tokio = { version = "1", features = ["sync", "macros", "rt"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
 async-trait = "0.1"
@@ -20,7 +27,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # HTTP client (for LLM providers)
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 reqwest-eventsource = "0.6"
 
 # Error handling
@@ -30,16 +37,20 @@ anyhow = "1"
 # Crypto (for auth, hashing)
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
+getrandom = { version = "0.2", optional = true }
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
 # Concurrency
 dashmap = "6"
+
+# YAML parsing (for skill frontmatter)
+serde_yaml = "0.9"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

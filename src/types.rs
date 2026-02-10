@@ -297,6 +297,18 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    Cost(crate::cost::CostEvent),
+    PermissionCheck {
+        tool_name: String,
+        decision: String,
+    },
+    McpServerConnected {
+        server_name: String,
+        tool_count: usize,
+    },
+    SkillLoaded {
+        skill_name: String,
+    },
 }
 
 /// Delta updates during streaming

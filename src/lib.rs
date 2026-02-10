@@ -69,16 +69,24 @@
 
 pub mod agent;
 pub mod context;
+pub mod cost;
 pub mod error;
+pub mod executor;
 pub mod hook;
+pub mod mcp;
 pub mod memory;
+pub mod permission;
 pub mod provider;
 pub mod rlm;
 pub mod semantic_recursion;
 pub mod session;
+pub mod skill;
+pub mod soullog;
 pub mod subagent;
 pub mod tool;
 pub mod types;
+pub mod vexec;
+pub mod vfs;
 
 pub use error::SoulError;
 pub use types::*;

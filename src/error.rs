@@ -44,6 +44,24 @@ pub enum SoulError {
     #[error("Failover exhausted: tried {attempts} providers")]
     FailoverExhausted { attempts: usize },
 
+    #[error("Permission denied: tool={tool_name}, {reason}")]
+    PermissionDenied { tool_name: String, reason: String },
+
+    #[error("Budget exceeded: {message}")]
+    BudgetExceeded { message: String },
+
+    #[error("MCP error: server={server}, {message}")]
+    Mcp { server: String, message: String },
+
+    #[error("JSON-RPC error: code={code}, {message}")]
+    JsonRpc { code: i32, message: String },
+
+    #[error("Skill parse error: {message}")]
+    SkillParse { message: String },
+
+    #[error("Executor not found: {name}")]
+    ExecutorNotFound { name: String },
+
     #[error("{0}")]
     Other(#[from] anyhow::Error),
 }

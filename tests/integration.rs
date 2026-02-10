@@ -11,9 +11,11 @@ use soul_core::hook::*;
 use soul_core::memory::MemoryStore;
 use soul_core::provider::{ProbeResult, Provider};
 use soul_core::session::{Session, SessionStore};
-use soul_core::subagent::{SubagentRole, SubagentSpawner};
+use soul_core::skill::{ShellSkillExecutor, SkillExecutor, SkillLoader};
+use soul_core::subagent::SubagentSpawner;
 use soul_core::tool::{Tool, ToolOutput, ToolRegistry};
 use soul_core::types::*;
+use soul_core::vfs::MemoryFs;
 
 // ─── Mock Provider ──────────────────────────────────────────────────────────
 
@@ -361,8 +363,8 @@ async fn agent_with_hooks() {
 
 #[tokio::test]
 async fn session_persistence_roundtrip() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = SessionStore::new(dir.path());
+    let fs: Arc<dyn soul_core::vfs::VirtualFs> = Arc::new(MemoryFs::new());
+    let store = SessionStore::new(fs, "");
 
     let mut session = Session::new().with_lane("test");
     let msg1 = Message::user("hello");
@@ -405,8 +407,8 @@ async fn session_persistence_roundtrip() {
 
 #[tokio::test]
 async fn memory_hierarchy_integration() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = MemoryStore::new(dir.path());
+    let fs: Arc<dyn soul_core::vfs::VirtualFs> = Arc::new(MemoryFs::new());
+    let store = MemoryStore::new(fs, "");
 
     // Write memory
     store
@@ -627,6 +629,10 @@ async fn event_stream_completeness() {
             AgentEvent::CompactionStart { .. } => "compact_start",
             AgentEvent::CompactionEnd { .. } => "compact_end",
             AgentEvent::Error { .. } => "error",
+            AgentEvent::Cost(_) => "cost",
+            AgentEvent::PermissionCheck { .. } => "permission_check",
+            AgentEvent::McpServerConnected { .. } => "mcp_connected",
+            AgentEvent::SkillLoaded { .. } => "skill_loaded",
         })
         .map(|s| s.to_string())
         .collect();
@@ -794,4 +800,193 @@ async fn persist_hook_transforms_results() {
         assert!(content.contains("[REDACTED]"));
         assert!(!content.contains("password123"));
     }
+}
+
+// ─── Skills → Tools Integration ────────────────────────────────────────────
+
+#[tokio::test]
+async fn skills_load_and_register_as_tools() {
+    use soul_core::vexec::MockExecutor;
+
+    let fs: Arc<dyn soul_core::vfs::VirtualFs> = Arc::new(MemoryFs::new());
+
+    // Write skill files to virtual filesystem
+    let search_skill = r#"---
+name: search_codebase
+description: Search the codebase for a pattern
+input_schema:
+  type: object
+  properties:
+    pattern:
+      type: string
+      description: Regex pattern to search for
+  required: [pattern]
+execution:
+  type: shell
+  command_template: "rg '{{pattern}}' --json"
+  timeout_secs: 30
+---
+Search the codebase using ripgrep. Returns JSON output with matching lines.
+"#;
+
+    let format_skill = r#"---
+name: format_code
+description: Format source code
+input_schema:
+  type: object
+  properties:
+    file:
+      type: string
+  required: [file]
+execution:
+  type: shell
+  command_template: "rustfmt {{file}}"
+---
+Format Rust source files.
+"#;
+
+    let llm_skill = r#"---
+name: summarize
+description: Summarize text using an LLM
+input_schema:
+  type: object
+  properties:
+    text:
+      type: string
+  required: [text]
+execution:
+  type: llm_delegate
+  model: haiku
+  system_prompt: "You are a summarizer."
+---
+Delegate to an LLM for text summarization.
+"#;
+
+    // Write .skill and .md files
+    fs.write("skills/search.skill", search_skill).await.unwrap();
+    fs.write("skills/format.md", format_skill).await.unwrap();
+    fs.write("skills/summarize.skill", llm_skill).await.unwrap();
+    fs.write("skills/readme.txt", "not a skill").await.unwrap();
+
+    // Load all skills
+    let loader = SkillLoader::new(fs.clone(), "skills");
+    let count = loader.load_all().await.unwrap();
+    assert_eq!(count, 3, "Should load 3 skill files (.skill and .md)");
+
+    // Verify skill names
+    let names = loader.names();
+    assert!(names.contains(&"search_codebase".to_string()));
+    assert!(names.contains(&"format_code".to_string()));
+    assert!(names.contains(&"summarize".to_string()));
+    assert_eq!(names.len(), 3);
+
+    // Verify skill definitions
+    let search = loader.get("search_codebase").unwrap();
+    assert_eq!(search.description, "Search the codebase for a pattern");
+    assert!(search.source_path.is_some());
+    assert!(search.body.contains("ripgrep"));
+
+    // Register all as tools
+    let exec = Arc::new(MockExecutor::always_ok("mock output\n"));
+    let executor: Arc<dyn SkillExecutor> = Arc::new(ShellSkillExecutor::new(exec));
+    let mut registry = ToolRegistry::new();
+    loader.register_all_as_tools(&mut registry, executor);
+
+    // Verify tools are in the registry
+    assert_eq!(registry.len(), 3);
+    assert!(registry.get("search_codebase").is_some());
+    assert!(registry.get("format_code").is_some());
+    assert!(registry.get("summarize").is_some());
+
+    // Verify tool definitions are correct
+    let defs = registry.definitions();
+    let search_def = defs.iter().find(|d| d.name == "search_codebase").unwrap();
+    assert_eq!(search_def.description, "Search the codebase for a pattern");
+    assert!(search_def.input_schema["properties"]["pattern"].is_object());
+
+    // Execute a skill through the tool interface
+    let tool = registry.get("search_codebase").unwrap();
+    let result = tool
+        .execute("call_1", json!({"pattern": "TODO"}), None)
+        .await
+        .unwrap();
+    assert!(!result.is_error);
+    assert_eq!(result.content.trim(), "mock output");
+}
+
+#[tokio::test]
+async fn skills_agent_loop_with_skill_tools() {
+    use soul_core::vexec::MockExecutor;
+
+    let fs: Arc<dyn soul_core::vfs::VirtualFs> = Arc::new(MemoryFs::new());
+
+    let skill_content = r#"---
+name: grep_tool
+description: Search for a pattern in files
+input_schema:
+  type: object
+  properties:
+    pattern:
+      type: string
+  required: [pattern]
+execution:
+  type: shell
+  command_template: "grep -r '{{pattern}}' ."
+---
+Search for patterns in files.
+"#;
+
+    fs.write("skills/grep.skill", skill_content).await.unwrap();
+
+    let loader = SkillLoader::new(fs.clone(), "skills");
+    loader.load_all().await.unwrap();
+
+    let exec = Arc::new(MockExecutor::always_ok("src/main.rs:42: TODO fix this\n"));
+    let executor: Arc<dyn SkillExecutor> = Arc::new(ShellSkillExecutor::new(exec));
+    let mut tools = ToolRegistry::new();
+    loader.register_all_as_tools(&mut tools, executor);
+
+    // Run agent loop with skill-based tools
+    let responses = vec![
+        Message::new(
+            Role::Assistant,
+            vec![ContentBlock::tool_call(
+                "tc1",
+                "grep_tool",
+                json!({"pattern": "TODO"}),
+            )],
+        ),
+        Message::assistant("Found a TODO at src/main.rs:42"),
+    ];
+
+    let provider = Arc::new(MockProvider::new(responses));
+    let config = AgentConfig::new(test_model(), "You have grep_tool available.");
+    let mut agent = AgentLoop::new(provider, tools, config);
+
+    let (event_tx, _) = mpsc::unbounded_channel();
+    let (_, steering_rx) = mpsc::unbounded_channel();
+
+    let options = RunOptions {
+        session_id: "skill-agent-test".into(),
+        initial_messages: vec![Message::user("Find all TODOs")],
+    };
+
+    let result = agent.run(options, event_tx, steering_rx).await.unwrap();
+
+    // tool_call + tool_result + final_response
+    assert_eq!(result.len(), 3);
+
+    // Tool result should contain the grep output
+    let tool_result_msg = &result[1];
+    assert_eq!(tool_result_msg.role, Role::Tool);
+    if let ContentBlock::ToolResult {
+        content, is_error, ..
+    } = &tool_result_msg.content[0]
+    {
+        assert!(content.contains("TODO fix this"));
+        assert!(!is_error);
+    }
+
+    // Final response
+    assert!(result[2].text_content().contains("TODO"));
 }
