@@ -32,6 +32,9 @@ use crate::error::{SoulError, SoulResult};
 /// Unique task identifier (monotonically increasing).
 pub type TaskId = u64;
 
+/// Unique question identifier (monotonically increasing).
+pub type QuestionId = u64;
+
 /// Task status progression.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -128,11 +131,51 @@ impl PlanTask {
     }
 }
 
+/// A clarifying question for the user — last resort for complex plans.
+///
+/// Questions are stored in the planner and surfaced to the consuming code
+/// (agent loop, CLI, etc.) which handles the actual IO. The planner itself
+/// never performs IO.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanQuestion {
+    pub id: QuestionId,
+    pub question: String,
+    /// Optional choices (if empty, freeform answer expected).
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// The user's answer, if provided.
+    pub answer: Option<String>,
+    /// Which task(s) this question relates to, if any.
+    #[serde(default)]
+    pub related_tasks: BTreeSet<TaskId>,
+}
+
+impl PlanQuestion {
+    fn new(id: QuestionId, question: impl Into<String>) -> Self {
+        Self {
+            id,
+            question: question.into(),
+            options: Vec::new(),
+            answer: None,
+            related_tasks: BTreeSet::new(),
+        }
+    }
+
+    /// Whether this question has been answered.
+    pub fn is_answered(&self) -> bool {
+        self.answer.is_some()
+    }
+}
+
 /// Serializable snapshot of a Planner (no Instant fields).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlannerSnapshot {
     pub tasks: BTreeMap<TaskId, PlanTask>,
     pub next_id: TaskId,
+    #[serde(default)]
+    pub questions: BTreeMap<QuestionId, PlanQuestion>,
+    #[serde(default)]
+    pub next_question_id: QuestionId,
 }
 
 impl PlannerSnapshot {
@@ -155,6 +198,9 @@ pub struct Planner {
     next_id: TaskId,
     /// Runtime-only: tracks when an in-progress task was started (not serialized).
     start_times: HashMap<TaskId, Instant>,
+    /// Clarifying questions for the user (last resort for complex plans).
+    questions: BTreeMap<QuestionId, PlanQuestion>,
+    next_question_id: QuestionId,
 }
 
 impl Planner {
@@ -163,6 +209,8 @@ impl Planner {
             tasks: BTreeMap::new(),
             next_id: 1,
             start_times: HashMap::new(),
+            questions: BTreeMap::new(),
+            next_question_id: 1,
         }
     }
 
@@ -172,6 +220,8 @@ impl Planner {
             tasks: snapshot.tasks,
             next_id: snapshot.next_id,
             start_times: HashMap::new(),
+            questions: snapshot.questions,
+            next_question_id: snapshot.next_question_id,
         }
     }
 
@@ -194,6 +244,8 @@ impl Planner {
         PlannerSnapshot {
             tasks,
             next_id: self.next_id,
+            questions: self.questions.clone(),
+            next_question_id: self.next_question_id,
         }
     }
 
@@ -450,6 +502,86 @@ impl Planner {
         Duration::from_millis(base_ms + live_ms)
     }
 
+    // ─── Clarifying Questions ────────────────────────────────────────────
+
+    /// Add a clarifying question. Returns its ID.
+    ///
+    /// Questions are last resort — only for genuinely ambiguous requirements
+    /// in complex plans. The consuming code handles the actual user IO.
+    pub fn add_question(&mut self, question: impl Into<String>) -> QuestionId {
+        let id = self.next_question_id;
+        self.next_question_id += 1;
+        self.questions.insert(id, PlanQuestion::new(id, question));
+        id
+    }
+
+    /// Add a question with multiple-choice options.
+    pub fn add_question_with_options(
+        &mut self,
+        question: impl Into<String>,
+        options: Vec<String>,
+    ) -> QuestionId {
+        let id = self.add_question(question);
+        if let Some(q) = self.questions.get_mut(&id) {
+            q.options = options;
+        }
+        id
+    }
+
+    /// Link a question to specific task(s).
+    pub fn link_question_to_task(
+        &mut self,
+        question_id: QuestionId,
+        task_id: TaskId,
+    ) -> SoulResult<()> {
+        let q = self.questions.get_mut(&question_id).ok_or_else(|| {
+            SoulError::Other(anyhow::anyhow!("Question #{question_id} not found"))
+        })?;
+        q.related_tasks.insert(task_id);
+        Ok(())
+    }
+
+    /// Record an answer to a question.
+    pub fn answer_question(
+        &mut self,
+        question_id: QuestionId,
+        answer: impl Into<String>,
+    ) -> SoulResult<()> {
+        let q = self.questions.get_mut(&question_id).ok_or_else(|| {
+            SoulError::Other(anyhow::anyhow!("Question #{question_id} not found"))
+        })?;
+        q.answer = Some(answer.into());
+        Ok(())
+    }
+
+    /// Get a question by ID.
+    pub fn get_question(&self, id: QuestionId) -> Option<&PlanQuestion> {
+        self.questions.get(&id)
+    }
+
+    /// All questions.
+    pub fn all_questions(&self) -> Vec<&PlanQuestion> {
+        self.questions.values().collect()
+    }
+
+    /// Questions that haven't been answered yet.
+    pub fn open_questions(&self) -> Vec<&PlanQuestion> {
+        self.questions
+            .values()
+            .filter(|q| !q.is_answered())
+            .collect()
+    }
+
+    /// Whether there are unanswered questions.
+    pub fn has_open_questions(&self) -> bool {
+        self.questions.values().any(|q| !q.is_answered())
+    }
+
+    /// Whether the plan is ready to execute (no open questions).
+    pub fn is_ready_to_execute(&self) -> bool {
+        !self.has_open_questions()
+    }
+
     /// Render the plan as a display string, similar to Claude Code's task rendering.
     ///
     /// Format:
@@ -505,6 +637,21 @@ impl Planner {
         let counts = self.counts();
         if counts.total > 0 {
             lines.push(format!("\n{}/{} completed", counts.completed, counts.total));
+        }
+
+        // Open questions
+        let open = self.open_questions();
+        if !open.is_empty() {
+            lines.push(String::new());
+            lines.push(format!("? {} open question(s):", open.len()));
+            for q in &open {
+                let mut line = format!("  ? {}", q.question);
+                if !q.options.is_empty() {
+                    let opts = q.options.join(" / ");
+                    line.push_str(&format!(" [{opts}]"));
+                }
+                lines.push(line);
+            }
         }
 
         lines.join("\n")
@@ -1159,5 +1306,156 @@ mod tests {
 
         planner.skip(t1).unwrap();
         assert!(planner.is_ready(t2));
+    }
+
+    // ─── Clarifying Questions ──────────────────────────────────────────
+
+    #[test]
+    fn add_question() {
+        let mut planner = Planner::new();
+        let qid = planner.add_question("Which database?");
+        assert_eq!(qid, 1);
+
+        let q = planner.get_question(qid).unwrap();
+        assert_eq!(q.question, "Which database?");
+        assert!(!q.is_answered());
+        assert!(q.options.is_empty());
+    }
+
+    #[test]
+    fn add_question_with_options() {
+        let mut planner = Planner::new();
+        let qid = planner.add_question_with_options(
+            "Auth method?",
+            vec!["JWT".into(), "OAuth".into(), "API key".into()],
+        );
+
+        let q = planner.get_question(qid).unwrap();
+        assert_eq!(q.options.len(), 3);
+        assert_eq!(q.options[1], "OAuth");
+    }
+
+    #[test]
+    fn answer_question() {
+        let mut planner = Planner::new();
+        let qid = planner.add_question("Which database?");
+        assert!(planner.has_open_questions());
+        assert!(!planner.is_ready_to_execute());
+
+        planner.answer_question(qid, "PostgreSQL").unwrap();
+
+        let q = planner.get_question(qid).unwrap();
+        assert!(q.is_answered());
+        assert_eq!(q.answer.as_deref(), Some("PostgreSQL"));
+        assert!(!planner.has_open_questions());
+        assert!(planner.is_ready_to_execute());
+    }
+
+    #[test]
+    fn answer_nonexistent_question_fails() {
+        let mut planner = Planner::new();
+        assert!(planner.answer_question(999, "nope").is_err());
+    }
+
+    #[test]
+    fn open_questions_filters_answered() {
+        let mut planner = Planner::new();
+        let q1 = planner.add_question("First?");
+        let _q2 = planner.add_question("Second?");
+        planner.answer_question(q1, "yes").unwrap();
+
+        let open = planner.open_questions();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].question, "Second?");
+    }
+
+    #[test]
+    fn no_questions_means_ready() {
+        let planner = Planner::new();
+        assert!(!planner.has_open_questions());
+        assert!(planner.is_ready_to_execute());
+    }
+
+    #[test]
+    fn link_question_to_task() {
+        let mut planner = Planner::new();
+        let t1 = planner.add_task("Build auth", None::<String>);
+        let qid = planner.add_question("JWT or OAuth?");
+        planner.link_question_to_task(qid, t1).unwrap();
+
+        let q = planner.get_question(qid).unwrap();
+        assert!(q.related_tasks.contains(&t1));
+    }
+
+    #[test]
+    fn link_nonexistent_question_fails() {
+        let mut planner = Planner::new();
+        let t1 = planner.add_task("Task", None::<String>);
+        assert!(planner.link_question_to_task(999, t1).is_err());
+    }
+
+    #[test]
+    fn question_ids_increment() {
+        let mut planner = Planner::new();
+        let q1 = planner.add_question("A?");
+        let q2 = planner.add_question("B?");
+        assert_eq!(q1, 1);
+        assert_eq!(q2, 2);
+    }
+
+    #[test]
+    fn all_questions() {
+        let mut planner = Planner::new();
+        planner.add_question("A?");
+        planner.add_question("B?");
+        assert_eq!(planner.all_questions().len(), 2);
+    }
+
+    #[test]
+    fn questions_survive_snapshot() {
+        let mut planner = Planner::new();
+        let qid = planner
+            .add_question_with_options("Which DB?", vec!["Postgres".into(), "SQLite".into()]);
+        planner.answer_question(qid, "Postgres").unwrap();
+
+        let json = planner.to_json().unwrap();
+        let restored = Planner::from_json(&json).unwrap();
+
+        let q = restored.get_question(qid).unwrap();
+        assert_eq!(q.question, "Which DB?");
+        assert_eq!(q.answer.as_deref(), Some("Postgres"));
+        assert_eq!(q.options.len(), 2);
+    }
+
+    #[test]
+    fn render_shows_open_questions() {
+        let mut planner = Planner::new();
+        planner.add_task("Build it", None::<String>);
+        planner.add_question("Which framework?");
+
+        let output = planner.render();
+        assert!(output.contains("1 open question(s)"));
+        assert!(output.contains("? Which framework?"));
+    }
+
+    #[test]
+    fn render_shows_options() {
+        let mut planner = Planner::new();
+        planner.add_task("Auth", None::<String>);
+        planner.add_question_with_options("Auth method?", vec!["JWT".into(), "OAuth".into()]);
+
+        let output = planner.render();
+        assert!(output.contains("[JWT / OAuth]"));
+    }
+
+    #[test]
+    fn render_hides_answered_questions() {
+        let mut planner = Planner::new();
+        planner.add_task("Build it", None::<String>);
+        let qid = planner.add_question("Which framework?");
+        planner.answer_question(qid, "Axum").unwrap();
+
+        let output = planner.render();
+        assert!(!output.contains("open question"));
     }
 }
