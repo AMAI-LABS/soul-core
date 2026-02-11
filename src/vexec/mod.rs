@@ -211,7 +211,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(all(feature = "native", not(target_os = "windows")))]
     #[tokio::test]
     async fn native_executor_cwd() {
         let dir = tempfile::tempdir().unwrap();

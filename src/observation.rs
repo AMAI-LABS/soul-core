@@ -201,7 +201,7 @@ impl ObservationStore {
         let all = self.read_all().await?;
         Ok(all
             .into_iter()
-            .filter(|o| o.kind == *kind && project.map_or(true, |p| o.project == p))
+            .filter(|o| o.kind == *kind && project.is_none_or(|p| o.project == p))
             .collect())
     }
 
@@ -212,7 +212,7 @@ impl ObservationStore {
         Ok(all
             .into_iter()
             .filter(|o| {
-                let project_match = project.map_or(true, |p| o.project == p);
+                let project_match = project.is_none_or(|p| o.project == p);
                 if !project_match {
                     return false;
                 }
