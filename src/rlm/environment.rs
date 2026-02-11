@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use regex::Regex;
+
 use crate::error::{SoulError, SoulResult};
 
 use super::dsl::DslCommand;
@@ -199,9 +201,12 @@ impl RlmEnvironment {
                 pattern,
             } => {
                 let text = self.require_text(source)?;
-                // Simple regex-like split on pattern (basic implementation)
-                let chunks: Vec<String> = text
-                    .split(pattern.as_str())
+                let re = Regex::new(pattern.as_str()).map_err(|e| {
+                    SoulError::Other(anyhow::anyhow!("Invalid regex pattern \"{pattern}\": {e}"))
+                })?;
+                // Split on regex — each non-empty segment becomes a chunk
+                let chunks: Vec<String> = re
+                    .split(&text)
                     .filter(|s| !s.trim().is_empty())
                     .map(|s| s.to_string())
                     .collect();
@@ -209,7 +214,7 @@ impl RlmEnvironment {
                 self.variables
                     .insert(target.clone(), Variable::List(chunks));
                 Ok(ExecResult::Output(format!(
-                    "Split into {count} sections by pattern \"{pattern}\""
+                    "Split into {count} sections by regex \"{pattern}\""
                 )))
             }
             DslCommand::Slice {

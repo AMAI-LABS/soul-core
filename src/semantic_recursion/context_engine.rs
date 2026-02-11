@@ -6,6 +6,8 @@
 
 use std::collections::HashMap;
 
+use chrono::Utc;
+
 use crate::types::Message;
 
 use super::fragment::{self, FragmentConfig};
@@ -30,6 +32,25 @@ pub struct ContextWindow {
     pub total_tokens: usize,
     pub node_ids_included: Vec<NodeId>,
     pub relevance_scores: Vec<f32>,
+}
+
+/// A compact summary of a node — title/summary without full content.
+/// Used for progressive disclosure (tier 1 retrieval).
+#[derive(Debug, Clone)]
+pub struct CompactNode {
+    pub node_id: NodeId,
+    pub kind: NodeKind,
+    pub summary: String,
+    pub token_estimate: usize,
+    pub relevance_score: f32,
+    pub observation_kind: Option<String>,
+}
+
+/// Compact retrieval result — node summaries without full content.
+#[derive(Debug, Clone)]
+pub struct CompactWindow {
+    pub nodes: Vec<CompactNode>,
+    pub total_tokens: usize,
 }
 
 /// The semantic context engine
@@ -204,7 +225,24 @@ impl SemanticContextEngine {
             }
         }
 
-        // 4. If requested, include graph neighbors of top results
+        // 4. Apply recency boost — nodes created in the last 5 minutes get 1.5x score,
+        //    fading linearly to 1.0x at 30 minutes.
+        let now = Utc::now();
+        for (node_id, score) in candidates.iter_mut() {
+            if let Some(node) = self.graph.get_node(*node_id) {
+                let age_secs = (now - node.created_at).num_seconds().max(0) as f32;
+                let boost = if age_secs < 300.0 {
+                    1.5
+                } else if age_secs < 1800.0 {
+                    1.5 - ((age_secs - 300.0) / 1500.0) * 0.5
+                } else {
+                    1.0
+                };
+                *score *= boost;
+            }
+        }
+
+        // 5. If requested, include graph neighbors of top results
         if query.include_graph_neighbors {
             let top_ids: Vec<NodeId> = {
                 let mut scored: Vec<(NodeId, f32)> =
@@ -224,7 +262,7 @@ impl SemanticContextEngine {
             }
         }
 
-        // 5. Sort by score and fit within token budget
+        // 6. Sort by score and fit within token budget
         let mut scored: Vec<(NodeId, f32)> = candidates.into_iter().collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -437,6 +475,74 @@ impl SemanticContextEngine {
             symlink_count: self.symlinks.len(),
             symlink_tokens_saved: self.symlinks.total_tokens_saved(),
         }
+    }
+
+    /// Compact retrieval — returns node summaries (title + first line) without full content.
+    ///
+    /// This is tier-1 progressive disclosure: minimal token cost. The caller can
+    /// use the returned `node_id` values to call `retrieve()` or access specific nodes
+    /// for full content when needed.
+    pub fn retrieve_compact(&mut self, query: &RetrievalQuery) -> CompactWindow {
+        let window = self.retrieve(query);
+        let mut nodes = Vec::new();
+        let mut total_tokens = 0;
+
+        for (i, node_id) in window.node_ids_included.iter().enumerate() {
+            if let Some(node) = self.graph.get_node(*node_id) {
+                // Summary = first non-empty line, truncated to 120 chars
+                let summary = node
+                    .content
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("")
+                    .chars()
+                    .take(120)
+                    .collect::<String>();
+
+                let obs_kind = node.metadata.get("observation_kind").cloned();
+                let token_est = summary.len().div_ceil(4);
+                total_tokens += token_est;
+
+                nodes.push(CompactNode {
+                    node_id: *node_id,
+                    kind: node.kind.clone(),
+                    summary,
+                    token_estimate: token_est,
+                    relevance_score: window.relevance_scores[i],
+                    observation_kind: obs_kind,
+                });
+            }
+        }
+
+        CompactWindow {
+            nodes,
+            total_tokens,
+        }
+    }
+
+    /// Ingest a user request with an optional observation kind tag.
+    ///
+    /// The `observation_kind` is stored in node metadata and surfaced in
+    /// compact retrieval, allowing structured filtering of past observations.
+    pub fn ingest_with_observation_kind(
+        &mut self,
+        text: &str,
+        kind: NodeKind,
+        observation_kind: Option<&str>,
+    ) -> NodeId {
+        let mut meta = HashMap::new();
+        if let Some(ok) = observation_kind {
+            meta.insert("observation_kind".to_string(), ok.to_string());
+        }
+        let node_id = self
+            .graph
+            .add_node(kind.clone(), text.to_string(), meta.clone());
+
+        meta.insert("node_id".into(), node_id.to_string());
+        meta.insert("kind".into(), format!("{kind:?}").to_lowercase());
+        self.vector_store.insert(text, meta);
+
+        node_id
     }
 
     /// Access the graph directly

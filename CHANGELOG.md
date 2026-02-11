@@ -5,6 +5,26 @@ All notable changes to `soul-core` will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-02-10
+
+### Added
+- `observation` module — cross-session L3 memory (inspired by claude-mem)
+  - `ObservationKind` enum: BugFix 🔴, Feature 🟣, Refactor 🔄, Change ✅, Discovery 🔵, Decision ⚖️
+  - `Observation` struct with builder pattern (`with_facts`, `with_files`, `with_concepts`)
+  - `ObservationStore` — append-only JSONL via `VirtualFs`, no external DB dependency
+  - Retrieval: `load_project`, `load_session`, `load_recent`, `load_by_kind`, `search` (keyword)
+  - `build_context_block()` renders recent observations as markdown for session-start injection
+  - 19 tests
+- `semantic_recursion::SemanticContextEngine::retrieve_compact()` — tier-1 progressive disclosure
+  - Returns `CompactWindow` with `CompactNode` summaries (first line, 120 chars) instead of full messages
+  - ~10x token reduction vs full `retrieve()` — LLM expands specific nodes on demand
+- `semantic_recursion::SemanticContextEngine::ingest_with_observation_kind()` — tag nodes with semantic type
+  - Stores `observation_kind` in node metadata, surfaced in compact retrieval
+- Recency weighting in `retrieve()` — nodes created in last 5 min get 1.5x score boost, fading to 1.0x at 30 min
+- Real regex in `RlmEngine` `BY_REGEX` chunking — now uses `regex` crate instead of literal string split
+  - Enables splitting on patterns like `^## `, `---`, code block markers
+- Clearer error feedback in RLM engine — parse/execution errors now formatted as `// PARSE ERROR: ...` / `// ERROR: ...` so LLM understands what went wrong and can fix syntax
+
 ## [0.10.1] - 2026-02-09
 
 ### Added

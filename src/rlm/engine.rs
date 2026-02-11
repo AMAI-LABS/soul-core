@@ -259,13 +259,17 @@ impl RlmEngine {
                                         .push(format!("[FILTER → {target}]: {count} items kept"));
                                 }
                                 Err(e) => {
-                                    iter_outputs.push(format!("Error: {e}"));
+                                    iter_outputs.push(format!(
+                                        "// ERROR: {e}\n// Fix the command and retry."
+                                    ));
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        iter_outputs.push(format!("Parse error: {e}"));
+                        iter_outputs.push(format!(
+                            "// PARSE ERROR: {e}\n// Fix the ```rlm``` block syntax and retry."
+                        ));
                     }
                 }
             }

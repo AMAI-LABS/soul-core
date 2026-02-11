@@ -76,6 +76,7 @@ pub mod executor;
 pub mod hook;
 pub mod mcp;
 pub mod memory;
+pub mod observation;
 pub mod permission;
 pub mod planner;
 pub mod provider;
