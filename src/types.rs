@@ -295,7 +295,12 @@ pub struct ModelInfo {
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
     Anthropic,
+    #[serde(rename = "openai")]
     OpenAI,
+    /// OpenAI Codex — uses ChatGPT/Codex OAuth subscription tokens instead of API keys.
+    /// Model strings: `openai-codex/gpt-5.3-codex`
+    #[serde(rename = "openai-codex")]
+    OpenAICodex,
     Ollama,
     Gemini,
     Bedrock,
@@ -308,12 +313,56 @@ impl std::fmt::Display for ProviderKind {
         match self {
             ProviderKind::Anthropic => write!(f, "anthropic"),
             ProviderKind::OpenAI => write!(f, "openai"),
+            ProviderKind::OpenAICodex => write!(f, "openai-codex"),
             ProviderKind::Ollama => write!(f, "ollama"),
             ProviderKind::Gemini => write!(f, "gemini"),
             ProviderKind::Bedrock => write!(f, "bedrock"),
             ProviderKind::Local => write!(f, "local"),
             ProviderKind::Custom(s) => write!(f, "{s}"),
         }
+    }
+}
+
+// ─── Auth Mode ───────────────────────────────────────────────────────────────
+
+/// How the caller authenticates with a provider.
+///
+/// - `ApiKey` — static API key or Bearer token (default for Anthropic, OpenAI, etc.)
+/// - `OAuth` — short-lived access token backed by a long-lived refresh token.
+///   Used for subscription-based auth (ChatGPT/Codex OAuth, Anthropic Claude OAuth).
+///   The provider is responsible for refreshing the access token before it expires.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AuthMode {
+    #[default]
+    ApiKey,
+    #[serde(rename = "oauth")]
+    OAuth {
+        /// Long-lived refresh token used to obtain new access tokens.
+        refresh_token: String,
+        /// Unix timestamp (milliseconds) when `api_key` (the access token) expires.
+        expires_at_ms: u64,
+    },
+}
+
+impl AuthMode {
+    /// Returns `true` if this is an OAuth profile with an expired access token.
+    pub fn is_token_expired(&self) -> bool {
+        match self {
+            AuthMode::OAuth { expires_at_ms, .. } => {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                now_ms >= *expires_at_ms
+            }
+            AuthMode::ApiKey => false,
+        }
+    }
+
+    /// Returns `true` if this is an OAuth mode profile.
+    pub fn is_oauth(&self) -> bool {
+        matches!(self, AuthMode::OAuth { .. })
     }
 }
 
@@ -540,7 +589,12 @@ impl AgentConfig {
 pub struct AuthProfile {
     pub id: String,
     pub provider: ProviderKind,
+    /// Access token or API key. For OAuth profiles this is the short-lived access token;
+    /// use `auth_mode` to get the refresh token and expiry.
     pub api_key: String,
+    /// Authentication mode — defaults to `ApiKey` for backwards compatibility.
+    #[serde(default, skip_serializing_if = "AuthMode::is_api_key")]
+    pub auth_mode: AuthMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -557,6 +611,33 @@ impl AuthProfile {
             id: Uuid::new_v4().to_string(),
             provider,
             api_key: api_key.into(),
+            auth_mode: AuthMode::ApiKey,
+            base_url: None,
+            org_id: None,
+            cooldown_until: None,
+            failure_reason: None,
+        }
+    }
+
+    /// Create an OAuth profile (subscription-based auth).
+    ///
+    /// - `access_token` — short-lived Bearer token used for API requests
+    /// - `refresh_token` — long-lived token used to obtain new access tokens
+    /// - `expires_at_ms` — Unix timestamp (ms) when the access token expires
+    pub fn new_oauth(
+        provider: ProviderKind,
+        access_token: impl Into<String>,
+        refresh_token: impl Into<String>,
+        expires_at_ms: u64,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            provider,
+            api_key: access_token.into(),
+            auth_mode: AuthMode::OAuth {
+                refresh_token: refresh_token.into(),
+                expires_at_ms,
+            },
             base_url: None,
             org_id: None,
             cooldown_until: None,
@@ -566,6 +647,13 @@ impl AuthProfile {
 
     pub fn is_in_cooldown(&self) -> bool {
         self.cooldown_until.map(|t| Utc::now() < t).unwrap_or(false)
+    }
+}
+
+impl AuthMode {
+    /// Used for `skip_serializing_if` — omit the field when it's the default `ApiKey`.
+    pub fn is_api_key(mode: &AuthMode) -> bool {
+        matches!(mode, AuthMode::ApiKey)
     }
 }
 
