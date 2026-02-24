@@ -436,13 +436,21 @@ impl Provider for AnthropicProvider {
             }
         }
 
-        // Fix accumulated tool call JSON strings → proper JSON values
+        // Fix accumulated tool call JSON strings → proper JSON values.
+        // If the stream produced no input_json_delta events (e.g. tool called with no args),
+        // arguments stays as the initial json!({}) and no fix is needed.
+        // If deltas were accumulated into a String, parse it back to a JSON object.
+        // Empty string ("") means no args were streamed → use empty object {}.
         for block in &mut content_blocks {
             if let ContentBlock::ToolCall { arguments, .. } = block {
                 if let Some(s) = arguments.as_str() {
-                    if let Ok(parsed) = serde_json::from_str(s) {
+                    if s.is_empty() {
+                        *arguments = json!({});
+                    } else if let Ok(parsed) = serde_json::from_str(s) {
                         *arguments = parsed;
                     }
+                    // If parsing failed but string is non-empty, leave as-is
+                    // (shouldn't happen in practice, but avoids silent data loss)
                 }
             }
         }
