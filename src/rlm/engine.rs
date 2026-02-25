@@ -819,6 +819,19 @@ impl RlmEngine {
         }
 
         recent.reverse();
+
+        // Enforce Anthropic API constraint: every tool_result must have a matching
+        // tool_use in the immediately preceding assistant message.
+        // If the window starts mid-exchange (i.e., starts with a Tool role message),
+        // drop Tool messages from the front until the window starts with User or Assistant.
+        while let Some(first) = recent.first() {
+            if first.role == Role::Tool {
+                recent.remove(0);
+            } else {
+                break;
+            }
+        }
+
         (recent, metadata)
     }
 
@@ -1264,5 +1277,35 @@ mod tests {
 
         assert_eq!(recent1.len(), recent2.len());
         assert_eq!(meta1, meta2);
+    }
+
+    #[test]
+    fn context_window_never_starts_with_tool_result() {
+        // Simulate a conversation where context cut happens mid-exchange.
+        // The RLM window must not start with a tool_result (no matching tool_use).
+        let messages = vec![
+            Message::user("turn 1 question"),
+            Message::assistant("answer 1"),
+            // turn 2: tool exchange
+            Message::user("turn 2 question"),
+            Message::assistant("calling tool"),
+            Message::tool_result("tc1", "tool output", false),
+            // turn 3: next user
+            Message::user("turn 3 question"),
+            Message::assistant("answer 3"),
+        ];
+
+        // Budget so small it cuts after the tool_result but includes the tool_result message
+        // (walk backward: "answer 3" + "turn 3 question" + "tool output" fit, but "calling tool" does not)
+        let small_budget = 50; // just enough for last 3 messages
+        let doc = RlmEngine::serialize_conversation(&messages);
+        let (recent, _) = RlmEngine::build_context_window_with_doc(&messages, small_budget, &doc);
+
+        // First message must not be a Tool role
+        assert!(
+            recent.is_empty() || recent[0].role != Role::Tool,
+            "Window must not start with a tool_result — first msg role: {:?}",
+            recent.first().map(|m| &m.role)
+        );
     }
 }
