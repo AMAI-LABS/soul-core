@@ -448,9 +448,17 @@ impl Provider for AnthropicProvider {
                         *arguments = json!({});
                     } else if let Ok(parsed) = serde_json::from_str(s) {
                         *arguments = parsed;
+                    } else {
+                        // Model emitted a JSON-escaped string as the args value
+                        // (e.g. "{\"path\":\"foo\"}" instead of {"path":"foo"}).
+                        // Try double-decoding: parse the string as JSON, then if the
+                        // result is itself a string, parse that again.
+                        if let Ok(serde_json::Value::String(inner)) = serde_json::from_str::<serde_json::Value>(s) {
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&inner) {
+                                *arguments = parsed;
+                            }
+                        }
                     }
-                    // If parsing failed but string is non-empty, leave as-is
-                    // (shouldn't happen in practice, but avoids silent data loss)
                 }
             }
         }
