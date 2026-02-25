@@ -114,6 +114,14 @@ impl RateLimitTracker {
         }
     }
 
+    /// Clear any active cooldown, allowing the slot to accept requests again.
+    /// Used after sleeping for rate limit reset.
+    pub fn clear_cooldown(&self) {
+        if let Ok(mut guard) = self.cooldown_until.lock() {
+            *guard = None;
+        }
+    }
+
     pub fn status(&self) -> RateLimitStatus {
         self.reset_windows_if_needed();
         RateLimitStatus {

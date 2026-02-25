@@ -231,10 +231,38 @@ impl Provider for BalancedProvider {
     ) -> SoulResult<Message> {
         // TODO: extract intent from system prompt or messages
         // For now, use no intent (pure load balancing)
-        let max_attempts = self.slots.len().min(5);
+        //
+        // Rate limit retry: on 429/overload, sleep and retry up to 3 times before
+        // exhausting. This converts rate-limit errors into pauses rather than crashes,
+        // which is essential when using a single-provider config.
+        let slot_attempts = self.slots.len().min(5);
+        // Additional retries for rate-limited scenarios (sleep-and-retry)
+        let mut rate_limit_retries = 0;
+        const MAX_RATE_LIMIT_RETRIES: usize = 3;
+        const RATE_LIMIT_SLEEP_SECS: u64 = 65; // Slightly over 1 minute to let TPM window reset
 
-        for _attempt in 0..max_attempts {
-            let idx = self.select(None)?;
+        for _attempt in 0..slot_attempts {
+            let idx = match self.select(None) {
+                Ok(idx) => idx,
+                Err(_) => {
+                    // All slots in cooldown — if we have rate limit retries left, sleep and try again
+                    if rate_limit_retries < MAX_RATE_LIMIT_RETRIES {
+                        rate_limit_retries += 1;
+                        tracing::warn!(
+                            retry = rate_limit_retries,
+                            sleep_secs = RATE_LIMIT_SLEEP_SECS,
+                            "Balanced: all slots in cooldown, sleeping for rate limit reset"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(RATE_LIMIT_SLEEP_SECS)).await;
+                        // Clear cooldowns after sleep so slots become available again
+                        for slot in &self.slots {
+                            slot.rate_limit.clear_cooldown();
+                        }
+                        continue;
+                    }
+                    return Err(SoulError::FailoverExhausted { attempts: slot_attempts });
+                }
+            };
             let slot = &self.slots[idx];
 
             tracing::info!(
@@ -260,9 +288,21 @@ impl Provider for BalancedProvider {
                     slot.rate_limit.record_success(tokens);
                     return Ok(msg);
                 }
-                Ok(Err(SoulError::RateLimited { .. })) => {
-                    slot.rate_limit.set_cooldown(60);
+                Ok(Err(SoulError::RateLimited { retry_after_ms, .. })) => {
+                    let sleep_ms = retry_after_ms.max(RATE_LIMIT_SLEEP_SECS * 1000);
+                    slot.rate_limit.set_cooldown(sleep_ms / 1000);
                     slot.rate_limit.record_failure("rate_limited");
+                    if rate_limit_retries < MAX_RATE_LIMIT_RETRIES {
+                        rate_limit_retries += 1;
+                        tracing::warn!(
+                            provider = %slot.name,
+                            retry = rate_limit_retries,
+                            sleep_ms,
+                            "Balanced: rate limited, sleeping before retry"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+                        slot.rate_limit.clear_cooldown();
+                    }
                     continue;
                 }
                 Ok(Err(e)) => {
@@ -285,7 +325,7 @@ impl Provider for BalancedProvider {
         }
 
         Err(SoulError::FailoverExhausted {
-            attempts: max_attempts,
+            attempts: slot_attempts,
         })
     }
 
