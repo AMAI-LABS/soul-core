@@ -805,33 +805,45 @@ impl RlmEngine {
     ) -> (Vec<Message>, String) {
         let metadata = Self::context_metadata(cached_doc);
 
-        // Walk backward from end, collecting messages until budget
-        let mut recent = Vec::new();
-        let mut tokens = 0;
+        // Walk backward from end, collecting messages until budget.
+        //
+        // Anthropic requires every tool_result block to have a matching tool_use
+        // in the immediately preceding assistant message. This means we must NEVER
+        // cut a conversation between an Assistant (tool_use) and the Tool (tool_result)
+        // that follows it — they must always appear together.
+        //
+        // Strategy: collect greedily backward, then snap the cut point to the
+        // nearest clean exchange boundary (just before a User message, or just
+        // before an Assistant message that is NOT preceded by a Tool message).
+        //
+        // In Anthropic's message structure:
+        //   User → Assistant(tool_use) → Tool(tool_result) → [repeat] → Assistant(text)
+        // A "clean cut point" is the boundary BEFORE a User message (i.e., after
+        // a complete Tool → User transition), or the very start of the array.
 
-        for msg in messages.iter().rev() {
+        let mut tokens = 0usize;
+        let mut cut_at = 0usize; // include all by default
+
+        for (i, msg) in messages.iter().enumerate().rev() {
             let msg_tokens = msg.estimate_tokens();
-            if tokens + msg_tokens > max_recent_tokens && !recent.is_empty() {
+            // Only cut if we already have something AND adding this would exceed budget.
+            // (Never cut the very last message — the LLM needs at least the current state.)
+            if tokens + msg_tokens > max_recent_tokens && i < messages.len() - 1 {
+                // Budget exceeded. Find the nearest clean cut point at or after i+1.
+                // A clean cut point is just before a User message. This ensures we
+                // never start the window with a Tool (tool_result) or mid-exchange
+                // Assistant (tool_use) that has no matching context.
+                let mut clean = i + 1;
+                while clean < messages.len() && messages[clean].role != Role::User {
+                    clean += 1;
+                }
+                cut_at = clean;
                 break;
             }
-            recent.push(msg.clone());
             tokens += msg_tokens;
         }
 
-        recent.reverse();
-
-        // Enforce Anthropic API constraint: every tool_result must have a matching
-        // tool_use in the immediately preceding assistant message.
-        // If the window starts mid-exchange (i.e., starts with a Tool role message),
-        // drop Tool messages from the front until the window starts with User or Assistant.
-        while let Some(first) = recent.first() {
-            if first.role == Role::Tool {
-                recent.remove(0);
-            } else {
-                break;
-            }
-        }
-
+        let recent = messages[cut_at..].to_vec();
         (recent, metadata)
     }
 
@@ -1281,31 +1293,80 @@ mod tests {
 
     #[test]
     fn context_window_never_starts_with_tool_result() {
-        // Simulate a conversation where context cut happens mid-exchange.
-        // The RLM window must not start with a tool_result (no matching tool_use).
+        // Simulate a conversation where budget cut happens mid-exchange.
+        // The window must not start with a Tool role (no matching tool_use).
+        // It must snap to the next User message boundary.
         let messages = vec![
-            Message::user("turn 1 question"),
-            Message::assistant("answer 1"),
+            Message::user("turn 1 question"),   // [0]
+            Message::assistant("answer 1"),      // [1]
             // turn 2: tool exchange
-            Message::user("turn 2 question"),
-            Message::assistant("calling tool"),
-            Message::tool_result("tc1", "tool output", false),
+            Message::user("turn 2 question"),    // [2]
+            Message::assistant("calling tool"),  // [3] — has tool_use
+            Message::tool_result("tc1", "tool output that is somewhat long to force a cut", false), // [4]
             // turn 3: next user
-            Message::user("turn 3 question"),
-            Message::assistant("answer 3"),
+            Message::user("turn 3 question"),    // [5]
+            Message::assistant("answer 3"),      // [6]
         ];
 
-        // Budget so small it cuts after the tool_result but includes the tool_result message
-        // (walk backward: "answer 3" + "turn 3 question" + "tool output" fit, but "calling tool" does not)
-        let small_budget = 50; // just enough for last 3 messages
+        // Use a budget that fits [4][5][6] but NOT [3][4][5][6].
+        // Messages [5]+[6] ≈ 8 tokens, [4] ≈ 15 tokens, [3] ≈ 4 tokens.
+        // Budget of 30 should fit [4][5][6] (≈27) but not add [3] (≈31).
+        // The algorithm must snap the cut to [5] (the next User after the overage point).
+        let budget = 30;
         let doc = RlmEngine::serialize_conversation(&messages);
-        let (recent, _) = RlmEngine::build_context_window_with_doc(&messages, small_budget, &doc);
+        let (recent, _) = RlmEngine::build_context_window_with_doc(&messages, budget, &doc);
 
-        // First message must not be a Tool role
-        assert!(
-            recent.is_empty() || recent[0].role != Role::Tool,
-            "Window must not start with a tool_result — first msg role: {:?}",
-            recent.first().map(|m| &m.role)
+        // Window must not be empty and must start with a User message
+        assert!(!recent.is_empty(), "Window should not be empty");
+        assert_eq!(
+            recent[0].role, Role::User,
+            "Window must start with User, not {:?}", recent[0].role
         );
+        // The last message must always be included
+        assert_eq!(
+            recent.last().unwrap().text_content(), "answer 3",
+            "Most recent message must always be in window"
+        );
+    }
+
+    #[test]
+    fn context_window_keeps_tool_use_and_result_together() {
+        // When budget is tight, the algorithm must keep tool_use + tool_result together
+        // or exclude both — never include just the tool_result without tool_use.
+        let messages = vec![
+            Message::user("q1"),                 // [0]
+            Message::assistant("a1"),             // [1]
+            Message::user("q2"),                  // [2]
+            Message::assistant("calling"),        // [3] tool_use
+            Message::tool_result("tc1", "result", false), // [4] tool_result
+            Message::user("q3"),                  // [5]
+            Message::assistant("a3"),             // [6]
+        ];
+
+        // Try every budget from 0 to 10000, verify invariant holds
+        let doc = RlmEngine::serialize_conversation(&messages);
+        for budget in [5, 10, 15, 20, 25, 30, 50, 100, 10_000] {
+            let (recent, _) = RlmEngine::build_context_window_with_doc(&messages, budget, &doc);
+
+            // Invariant: if a Tool message is in the window, the preceding message
+            // must be an Assistant message (the tool_use that matches it)
+            for (i, msg) in recent.iter().enumerate() {
+                if msg.role == Role::Tool {
+                    assert!(
+                        i > 0 && recent[i - 1].role == Role::Assistant,
+                        "budget={budget}: Tool at window[{i}] has no preceding Assistant. Window roles: {:?}",
+                        recent.iter().map(|m| &m.role).collect::<Vec<_>>()
+                    );
+                }
+            }
+
+            // Invariant: first message is never Tool role
+            if let Some(first) = recent.first() {
+                assert_ne!(
+                    first.role, Role::Tool,
+                    "budget={budget}: Window starts with Tool role"
+                );
+            }
+        }
     }
 }
