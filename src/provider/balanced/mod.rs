@@ -318,19 +318,34 @@ impl Provider for BalancedProvider {
                     }
                     return Err(SoulError::FailoverExhausted { attempts: slot_attempts });
                 }
+                Ok(Err(SoulError::Auth(msg))) => {
+                    // Auth errors are permanent — don't retry, fail immediately
+                    tracing::error!(
+                        provider = %slot.name,
+                        error = %msg,
+                        "Balanced: auth error (permanent), not retrying"
+                    );
+                    slot.rate_limit.record_failure(&msg);
+                    return Err(SoulError::Auth(msg));
+                }
                 Ok(Err(e)) => {
                     slot.rate_limit.record_failure(&e.to_string());
-                    // For transient errors (overload, connection issues) sleep and retry.
-                    // 529/503 overloads arrive as SoulError::Provider — retry same as rate limits.
-                    let cooldown_secs = if e.to_string().contains("529")
+                    // Only retry on truly transient errors: 5xx overload, connection issues.
+                    // Client errors (400, 413, etc.) should fail immediately.
+                    let is_transient = e.to_string().contains("529")
                         || e.to_string().contains("503")
+                        || e.to_string().contains("502")
                         || e.to_string().contains("overload")
-                        || e.to_string().contains("connection")
-                    {
-                        RATE_LIMIT_SLEEP_SECS
-                    } else {
-                        30
-                    };
+                        || e.to_string().contains("connection");
+                    if !is_transient {
+                        // Non-transient error: try next slot (failover), but don't sleep-retry
+                        slot.rate_limit.set_cooldown(30);
+                        if slot_attempts < max_slot_attempts {
+                            continue;
+                        }
+                        return Err(SoulError::FailoverExhausted { attempts: slot_attempts });
+                    }
+                    let cooldown_secs = RATE_LIMIT_SLEEP_SECS;
                     slot.rate_limit.set_cooldown(cooldown_secs);
                     if slot_attempts < max_slot_attempts {
                         continue;
@@ -343,7 +358,7 @@ impl Provider for BalancedProvider {
                             retry = rate_limit_retries,
                             sleep_secs = cooldown_secs,
                             error = %e,
-                            "Balanced: provider error, sleeping before retry"
+                            "Balanced: transient provider error, sleeping before retry"
                         );
                         tokio::time::sleep(std::time::Duration::from_secs(cooldown_secs)).await;
                         slot.rate_limit.clear_cooldown();
