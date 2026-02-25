@@ -232,20 +232,27 @@ impl Provider for BalancedProvider {
         // TODO: extract intent from system prompt or messages
         // For now, use no intent (pure load balancing)
         //
-        // Rate limit retry: on 429/overload, sleep and retry up to 3 times before
-        // exhausting. This converts rate-limit errors into pauses rather than crashes,
-        // which is essential when using a single-provider config.
-        let slot_attempts = self.slots.len().min(5);
-        // Additional retries for rate-limited scenarios (sleep-and-retry)
-        let mut rate_limit_retries = 0;
+        // Retry strategy:
+        // - slot_attempts: try each available slot (failover across providers)
+        // - rate_limit_retries: when rate limited, sleep and retry the same slot
+        //   This converts 429s into 65s pauses rather than immediate crashes.
         const MAX_RATE_LIMIT_RETRIES: usize = 3;
         const RATE_LIMIT_SLEEP_SECS: u64 = 65; // Slightly over 1 minute to let TPM window reset
 
-        for _attempt in 0..slot_attempts {
+        let mut slot_attempts = 0usize;
+        let max_slot_attempts = self.slots.len().min(5);
+        let mut rate_limit_retries = 0usize;
+
+        loop {
+            // Guard: don't try more slots than we have
+            if slot_attempts >= max_slot_attempts && rate_limit_retries >= MAX_RATE_LIMIT_RETRIES {
+                return Err(SoulError::FailoverExhausted { attempts: slot_attempts });
+            }
+
             let idx = match self.select(None) {
                 Ok(idx) => idx,
                 Err(_) => {
-                    // All slots in cooldown — if we have rate limit retries left, sleep and try again
+                    // All slots in cooldown — sleep and retry if we have retries left
                     if rate_limit_retries < MAX_RATE_LIMIT_RETRIES {
                         rate_limit_retries += 1;
                         tracing::warn!(
@@ -254,15 +261,16 @@ impl Provider for BalancedProvider {
                             "Balanced: all slots in cooldown, sleeping for rate limit reset"
                         );
                         tokio::time::sleep(std::time::Duration::from_secs(RATE_LIMIT_SLEEP_SECS)).await;
-                        // Clear cooldowns after sleep so slots become available again
                         for slot in &self.slots {
                             slot.rate_limit.clear_cooldown();
                         }
-                        continue;
+                        continue; // retry select after sleep
                     }
                     return Err(SoulError::FailoverExhausted { attempts: slot_attempts });
                 }
             };
+
+            slot_attempts += 1;
             let slot = &self.slots[idx];
 
             tracing::info!(
@@ -302,13 +310,21 @@ impl Provider for BalancedProvider {
                         );
                         tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
                         slot.rate_limit.clear_cooldown();
+                        continue; // retry same slot after sleep
                     }
-                    continue;
+                    // No retries left — try next slot (if any)
+                    if slot_attempts < max_slot_attempts {
+                        continue;
+                    }
+                    return Err(SoulError::FailoverExhausted { attempts: slot_attempts });
                 }
                 Ok(Err(e)) => {
                     slot.rate_limit.record_failure(&e.to_string());
                     slot.rate_limit.set_cooldown(30);
-                    continue;
+                    if slot_attempts < max_slot_attempts {
+                        continue;
+                    }
+                    return Err(SoulError::FailoverExhausted { attempts: slot_attempts });
                 }
                 Err(_elapsed) => {
                     tracing::error!(
@@ -319,14 +335,13 @@ impl Provider for BalancedProvider {
                     );
                     slot.rate_limit.record_failure("timeout");
                     slot.rate_limit.set_cooldown(60);
-                    continue;
+                    if slot_attempts < max_slot_attempts {
+                        continue;
+                    }
+                    return Err(SoulError::FailoverExhausted { attempts: slot_attempts });
                 }
             }
         }
-
-        Err(SoulError::FailoverExhausted {
-            attempts: slot_attempts,
-        })
     }
 
     /// Intent-aware completion — pass intent via model.id field as "intent:reasoning" etc.
