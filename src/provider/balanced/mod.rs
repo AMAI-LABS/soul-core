@@ -320,8 +320,33 @@ impl Provider for BalancedProvider {
                 }
                 Ok(Err(e)) => {
                     slot.rate_limit.record_failure(&e.to_string());
-                    slot.rate_limit.set_cooldown(30);
+                    // For transient errors (overload, connection issues) sleep and retry.
+                    // 529/503 overloads arrive as SoulError::Provider — retry same as rate limits.
+                    let cooldown_secs = if e.to_string().contains("529")
+                        || e.to_string().contains("503")
+                        || e.to_string().contains("overload")
+                        || e.to_string().contains("connection")
+                    {
+                        RATE_LIMIT_SLEEP_SECS
+                    } else {
+                        30
+                    };
+                    slot.rate_limit.set_cooldown(cooldown_secs);
                     if slot_attempts < max_slot_attempts {
+                        continue;
+                    }
+                    // Single slot: sleep and retry if we have retries left
+                    if rate_limit_retries < MAX_RATE_LIMIT_RETRIES {
+                        rate_limit_retries += 1;
+                        tracing::warn!(
+                            provider = %slot.name,
+                            retry = rate_limit_retries,
+                            sleep_secs = cooldown_secs,
+                            error = %e,
+                            "Balanced: provider error, sleeping before retry"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(cooldown_secs)).await;
+                        slot.rate_limit.clear_cooldown();
                         continue;
                     }
                     return Err(SoulError::FailoverExhausted { attempts: slot_attempts });
@@ -336,6 +361,16 @@ impl Provider for BalancedProvider {
                     slot.rate_limit.record_failure("timeout");
                     slot.rate_limit.set_cooldown(60);
                     if slot_attempts < max_slot_attempts {
+                        continue;
+                    }
+                    if rate_limit_retries < MAX_RATE_LIMIT_RETRIES {
+                        rate_limit_retries += 1;
+                        tracing::warn!(
+                            retry = rate_limit_retries,
+                            "Balanced: LLM timeout, sleeping before retry"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        slot.rate_limit.clear_cooldown();
                         continue;
                     }
                     return Err(SoulError::FailoverExhausted { attempts: slot_attempts });

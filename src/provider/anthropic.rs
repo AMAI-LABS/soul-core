@@ -303,10 +303,12 @@ impl Provider for AnthropicProvider {
                 "Anthropic: API error"
             );
 
-            if status.as_u16() == 429 {
+            if status.as_u16() == 429 || status.as_u16() == 529 {
+                // 429 = rate limit, 529 = overloaded — both need a backoff
+                let retry_ms = if status.as_u16() == 529 { 30_000 } else { 5_000 };
                 return Err(SoulError::RateLimited {
                     provider: "anthropic".into(),
-                    retry_after_ms: 5000,
+                    retry_after_ms: retry_ms,
                 });
             }
             if status.as_u16() == 401 || status.as_u16() == 403 {
