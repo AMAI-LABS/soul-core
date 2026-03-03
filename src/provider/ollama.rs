@@ -46,8 +46,19 @@ impl OllamaProvider {
             "stream": true,
         });
 
-        if model.max_output_tokens > 0 {
-            body["options"] = json!({"num_predict": model.max_output_tokens});
+        // Build options: num_predict cap + thinking control for qwen models
+        let is_qwen = model.id.to_lowercase().contains("qwen");
+        if model.max_output_tokens > 0 || is_qwen {
+            let mut opts = serde_json::Map::new();
+            if model.max_output_tokens > 0 {
+                opts.insert("num_predict".into(), json!(model.max_output_tokens));
+            }
+            // Disable extended thinking for qwen models — thinking phase adds 20-60s
+            // per turn latency without improving tool-calling accuracy.
+            if is_qwen {
+                opts.insert("think".into(), json!(false));
+            }
+            body["options"] = serde_json::Value::Object(opts);
         }
 
         if !tools.is_empty() {
@@ -446,6 +457,26 @@ mod tests {
         assert_eq!(body["messages"][0]["content"], "system");
         // Native API uses options.num_predict instead of max_tokens
         assert_eq!(body["options"]["num_predict"], 4096);
+    }
+
+    #[test]
+    fn qwen_model_disables_thinking() {
+        let provider = OllamaProvider::new();
+        let model = ModelInfo {
+            id: "qwen3.5:9b".into(),
+            provider: ProviderKind::Ollama,
+            context_window: 32768,
+            max_output_tokens: 2048,
+            supports_thinking: false,
+            supports_tools: true,
+            supports_images: false,
+            cost_per_input_token: 0.0,
+            cost_per_output_token: 0.0,
+        };
+        let messages = vec![Message::user("hello")];
+        let body = provider.build_body(&messages, "sys", &[], &model);
+        assert_eq!(body["options"]["think"], false, "qwen models must have think=false");
+        assert_eq!(body["options"]["num_predict"], 2048);
     }
 
     #[test]
