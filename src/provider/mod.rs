@@ -21,9 +21,9 @@ use std::time::Duration;
 /// Default timeout for LLM API requests (connection + full response).
 ///
 /// LLM streaming responses can take 60-120s for long generations.
-/// 5 minutes covers worst-case while preventing infinite hangs
-/// from stalled connections.
-const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+/// 10 minutes covers slow local models (9B+ on CPU/MPS) while preventing
+/// infinite hangs from stalled connections.
+const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Default connection timeout — fail fast if the server is unreachable.
 const LLM_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
