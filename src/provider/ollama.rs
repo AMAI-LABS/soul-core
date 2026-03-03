@@ -46,19 +46,15 @@ impl OllamaProvider {
             "stream": true,
         });
 
-        // Build options: num_predict cap + thinking control for qwen models
-        let is_qwen = model.id.to_lowercase().contains("qwen");
-        if model.max_output_tokens > 0 || is_qwen {
-            let mut opts = serde_json::Map::new();
-            if model.max_output_tokens > 0 {
-                opts.insert("num_predict".into(), json!(model.max_output_tokens));
-            }
-            // Disable extended thinking for qwen models — thinking phase adds 20-60s
-            // per turn latency without improving tool-calling accuracy.
-            if is_qwen {
-                opts.insert("think".into(), json!(false));
-            }
-            body["options"] = serde_json::Value::Object(opts);
+        if model.max_output_tokens > 0 {
+            body["options"] = json!({"num_predict": model.max_output_tokens});
+        }
+
+        // Disable extended thinking for qwen models.
+        // think=false must be at the TOP LEVEL of the request body (not inside options).
+        // Thinking adds 20-60s per-turn latency without improving tool-calling accuracy.
+        if model.id.to_lowercase().contains("qwen") {
+            body["think"] = json!(false);
         }
 
         if !tools.is_empty() {
@@ -475,7 +471,8 @@ mod tests {
         };
         let messages = vec![Message::user("hello")];
         let body = provider.build_body(&messages, "sys", &[], &model);
-        assert_eq!(body["options"]["think"], false, "qwen models must have think=false");
+        // think=false must be at the top level of the request body, not inside options
+        assert_eq!(body["think"], false, "qwen models must have think=false at top level");
         assert_eq!(body["options"]["num_predict"], 2048);
     }
 

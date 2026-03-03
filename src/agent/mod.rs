@@ -13,6 +13,27 @@ use crate::semantic_recursion::{RetrievalQuery, SemanticContextEngine};
 use crate::tool::{ToolOutput, ToolRegistry};
 use crate::types::*;
 
+/// Normalize tool names from LLM outputs that use non-canonical names.
+///
+/// Weaker models (especially qwen/local models) hallucinate tool names from their
+/// training data (OpenAI conventions) rather than the actual registered names.
+/// Map known aliases to their canonical amai tool names.
+fn normalize_tool_name(name: &str) -> &str {
+    match name {
+        "read_file" | "read_text_file" | "cat" | "view_file" => "read",
+        "write_file" | "create_file" | "save_file" | "write_text_file" => "write",
+        "list_files" | "list_directory" | "list_dir" => "ls",
+        "search_files" | "search_code" | "search_text" => "grep",
+        "run_command" | "execute_command" | "run_shell" | "shell" | "terminal" => "bash",
+        "edit_file" | "update_file" | "modify_file" | "replace_in_file" => "edit",
+        "append_to_file" | "append_text" => "append",
+        "find_files" | "search_directory" | "search_filesystem" => "find",
+        "glob_files" | "glob_pattern" => "glob",
+        "grep_search" | "grep_files" | "search_in_files" => "grep",
+        _ => name,
+    }
+}
+
 /// Maximum number of retries when a structural failure is detected in the LLM response.
 ///
 /// Structural failures are protocol-level breakages from weaker/free-tier models:
@@ -646,13 +667,26 @@ impl AgentLoop {
                             }
                         });
 
+                        // Try the original name first; fall back to normalized alias if not found.
+                        // This allows test tools registered as "read_file" to work normally,
+                        // while also handling weak models that hallucinate OpenAI-convention names.
+                        let alias = normalize_tool_name(&p.tool_name);
+                        let effective_name = if alias != p.tool_name.as_str()
+                            && exec_registry_ref.is_none()
+                            && tools_ref.get(&p.tool_name).is_none()
+                            && tools_ref.get_dynamic(&p.tool_name).is_none()
+                        {
+                            alias
+                        } else {
+                            p.tool_name.as_str()
+                        };
                         let output = if let Some(exec_registry) = exec_registry_ref {
                             exec_registry
-                                .execute(&p.tool_name, &p.call_id, p.tool_args.clone(), Some(partial_tx))
+                                .execute(effective_name, &p.call_id, p.tool_args.clone(), Some(partial_tx))
                                 .await
-                        } else if let Some(tool) = tools_ref.get(&p.tool_name) {
+                        } else if let Some(tool) = tools_ref.get(effective_name) {
                             tool.execute(&p.call_id, p.tool_args.clone(), Some(partial_tx)).await
-                        } else if let Some(tool) = tools_ref.get_dynamic(&p.tool_name) {
+                        } else if let Some(tool) = tools_ref.get_dynamic(effective_name) {
                             tool.execute(&p.call_id, p.tool_args.clone(), Some(partial_tx)).await
                         } else {
                             drop(partial_tx);
