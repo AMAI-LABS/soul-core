@@ -24,7 +24,7 @@ fn normalize_tool_name(name: &str) -> &str {
         "write_file" | "create_file" | "save_file" | "write_text_file" => "write",
         "list_files" | "list_directory" | "list_dir" => "ls",
         "search_files" | "search_code" | "search_text" => "grep",
-        "run_command" | "execute_command" | "run_shell" | "shell" | "terminal" => "bash",
+        "run_command" | "execute_command" | "run_shell" | "shell" | "terminal" | "exec" | "execute" | "run" => "bash",
         "edit_file" | "update_file" | "modify_file" | "replace_in_file" => "edit",
         "append_to_file" | "append_text" => "append",
         "find_files" | "search_directory" | "search_filesystem" => "find",
