@@ -392,7 +392,7 @@ fn strip_think_tags(s: &str) -> String {
             break;
         }
     }
-    result.trim().to_string()
+    result
 }
 
 #[cfg(test)]
@@ -532,6 +532,9 @@ mod tests {
         assert_eq!(strip_think_tags("prefix<think>thinking</think>suffix"), "prefixsuffix");
         assert_eq!(strip_think_tags("no think tags"), "no think tags");
         assert_eq!(strip_think_tags("<think>unclosed"), "");
+        // Streaming chunks must preserve whitespace
+        assert_eq!(strip_think_tags(" sorry"), " sorry");
+        assert_eq!(strip_think_tags("I"), "I");
     }
 
     #[test]
