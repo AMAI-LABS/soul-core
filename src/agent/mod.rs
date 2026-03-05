@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::context::{ContextConfig, ContextManager};
+use crate::context::{CompactionResult, CompactionStrategy, ContextConfig, ContextManager};
 use crate::cost::budget::{BudgetEnforcer, BudgetStatus};
 use crate::cost::CostTracker;
 use crate::error::{SoulError, SoulResult};
@@ -10,6 +10,7 @@ use crate::hook::{BeforeAgentStartContext, BeforeToolCallContext, HookAction, Ho
 use crate::provider::Provider;
 use crate::rlm::{RecallTool, RlmEngine, SharedContextDoc};
 use crate::semantic_recursion::{RetrievalQuery, SemanticContextEngine};
+use crate::subagent::{SubagentConfig, SubagentSpawner};
 use crate::tool::{ToolOutput, ToolRegistry};
 use crate::types::*;
 
@@ -146,6 +147,7 @@ pub struct AgentLoop {
     cost_tracker: Option<CostTracker>,
     budget: Option<BudgetEnforcer>,
     executor_registry: Option<ExecutorRegistry>,
+    summarizer: SubagentSpawner,
 }
 
 /// Options for running the agent loop
@@ -168,6 +170,9 @@ impl AgentLoop {
             _ => None,
         };
 
+        let mut summarizer = SubagentSpawner::new();
+        summarizer.add_provider(provider.kind(), provider.clone());
+
         Self {
             provider,
             tools,
@@ -178,6 +183,7 @@ impl AgentLoop {
             cost_tracker: None,
             budget: None,
             executor_registry: None,
+            summarizer,
         }
     }
 
@@ -302,20 +308,64 @@ impl AgentLoop {
 
             match self.config.context_strategy {
                 ContextStrategy::Classic => {
-                    // Traditional compaction — truncate when full
+                    // LLM-first compaction — summarize old messages, fall back to prune
                     if self
                         .context_manager
                         .needs_compaction(&messages, system_tokens)
                     {
+                        let messages_before = messages.len();
+                        let tokens_before = ContextManager::estimate_tokens(&messages);
+
                         let _ = event_tx.send(AgentEvent::CompactionStart {
-                            messages_before: messages.len(),
-                            tokens_before: ContextManager::estimate_tokens(&messages),
+                            messages_before,
+                            tokens_before,
                         });
 
-                        match self
-                            .context_manager
-                            .compact(&mut messages, None, system_tokens)
-                        {
+                        // Attempt LLM summarization of old messages.
+                        // Keep the most recent min_preserved_messages verbatim; summarize the rest.
+                        let keep_recent = self.context_manager.config().min_preserved_messages.max(4);
+                        let summarize_result = if messages.len() > keep_recent {
+                            let old_msgs = &messages[..messages.len() - keep_recent];
+                            let auth = AuthProfile::new(self.config.model.provider.clone(), "");
+                            let sub_config = SubagentConfig {
+                                name: "summarizer".into(),
+                                model: self.config.model.clone(),
+                                system_prompt: "You are a concise conversation summarizer. Preserve all key decisions, file paths modified, tool outputs, and task state. Be brief but complete.".into(),
+                                max_turns: 1,
+                                tools: vec![],
+                            };
+                            self.summarizer.summarize(&sub_config, old_msgs, &auth).await
+                        } else {
+                            Err(SoulError::CompactionFailed("not enough messages to summarize".into()))
+                        };
+
+                        let compaction_result = match summarize_result {
+                            Ok(summary) => {
+                                // Replace old messages with summary + keep recent verbatim
+                                let keep_start = messages.len() - keep_recent;
+                                let recent: Vec<Message> = messages[keep_start..].to_vec();
+                                let summary_msg = Message::user(format!(
+                                    "[Conversation summary — prior context compressed]\n\n{}",
+                                    summary.content
+                                ));
+                                messages = std::iter::once(summary_msg).chain(recent).collect();
+
+                                let tokens_after = ContextManager::estimate_tokens(&messages) + system_tokens;
+                                Ok(CompactionResult {
+                                    messages_before,
+                                    messages_after: messages.len(),
+                                    tokens_before,
+                                    tokens_after,
+                                    strategy: CompactionStrategy::Summarize,
+                                })
+                            }
+                            Err(_) => {
+                                // Fall back to structural compaction (offload + prune)
+                                self.context_manager.compact(&mut messages, None, system_tokens)
+                            }
+                        };
+
+                        match compaction_result {
                             Ok(result) => {
                                 let _ = event_tx.send(AgentEvent::CompactionEnd {
                                     messages_after: result.messages_after,

@@ -59,6 +59,10 @@ impl ContextManager {
         }
     }
 
+    pub fn config(&self) -> &ContextConfig {
+        &self.config
+    }
+
     /// Estimate total tokens in a message list
     pub fn estimate_tokens(messages: &[Message]) -> usize {
         messages.iter().map(|m| m.estimate_tokens()).sum()
