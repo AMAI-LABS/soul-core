@@ -50,11 +50,13 @@ impl OllamaProvider {
             body["options"] = json!({"num_predict": model.max_output_tokens});
         }
 
-        // Disable extended thinking for qwen models.
-        // think=false must be at the TOP LEVEL of the request body (not inside options).
-        // Thinking adds 20-60s per-turn latency without improving tool-calling accuracy.
-        if model.id.to_lowercase().contains("qwen") {
-            body["think"] = json!(false);
+        // Enable extended thinking for qwen models that support it (qwen3 base).
+        // think=true must be at the TOP LEVEL of the request body (not inside options).
+        // Note: qwen3-coder variants do NOT support thinking — ollama returns an error.
+        // Only enable for non-coder qwen3 models.
+        let model_id_lower = model.id.to_lowercase();
+        if model_id_lower.contains("qwen3") && !model_id_lower.contains("coder") {
+            body["think"] = json!(true);
         }
 
         if !tools.is_empty() {
@@ -233,13 +235,19 @@ impl Provider for OllamaProvider {
             if let Ok(data) = serde_json::from_str::<serde_json::Value>(line) {
                 // Extract content from message
                 if let Some(message) = data.get("message") {
-                    // Text content
+                    // `thinking` field — model's internal CoT, keep separate, don't emit to stream
+                    // (ollama puts extended thinking here when think=true)
+
+                    // Text content — strip any inline <think>...</think> blocks
                     if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
                         if !content.is_empty() {
-                            content_text.push_str(content);
-                            let _ = event_tx.send(StreamDelta::TextDelta {
-                                text: content.to_string(),
-                            });
+                            let visible = strip_think_tags(content);
+                            if !visible.is_empty() {
+                                content_text.push_str(&visible);
+                                let _ = event_tx.send(StreamDelta::TextDelta {
+                                    text: visible,
+                                });
+                            }
                         }
                     }
 
@@ -364,6 +372,29 @@ impl Provider for OllamaProvider {
     }
 }
 
+/// Strip `<think>...</think>` blocks from model output.
+/// Some models (qwen3 base) emit thinking inline in the content field.
+/// We keep the thinking internal — strip it before exposing as assistant text.
+fn strip_think_tags(s: &str) -> String {
+    let mut result = String::new();
+    let mut rest = s;
+    loop {
+        if let Some(start) = rest.find("<think>") {
+            result.push_str(&rest[..start]);
+            if let Some(end) = rest[start..].find("</think>") {
+                rest = &rest[start + end + "</think>".len()..];
+            } else {
+                // Unclosed tag — drop the rest (still thinking)
+                break;
+            }
+        } else {
+            result.push_str(rest);
+            break;
+        }
+    }
+    result.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,10 +487,30 @@ mod tests {
     }
 
     #[test]
-    fn qwen_model_disables_thinking() {
+    fn qwen3_base_enables_thinking() {
         let provider = OllamaProvider::new();
         let model = ModelInfo {
-            id: "qwen3.5:9b".into(),
+            id: "qwen3:30b".into(),
+            provider: ProviderKind::Ollama,
+            context_window: 32768,
+            max_output_tokens: 2048,
+            supports_thinking: true,
+            supports_tools: true,
+            supports_images: false,
+            cost_per_input_token: 0.0,
+            cost_per_output_token: 0.0,
+        };
+        let messages = vec![Message::user("hello")];
+        let body = provider.build_body(&messages, "sys", &[], &model);
+        // qwen3 base supports thinking — think=true at top level
+        assert_eq!(body["think"], true, "qwen3 base must have think=true at top level");
+    }
+
+    #[test]
+    fn qwen3_coder_no_thinking() {
+        let provider = OllamaProvider::new();
+        let model = ModelInfo {
+            id: "qwen3-coder:30b".into(),
             provider: ProviderKind::Ollama,
             context_window: 32768,
             max_output_tokens: 2048,
@@ -471,9 +522,16 @@ mod tests {
         };
         let messages = vec![Message::user("hello")];
         let body = provider.build_body(&messages, "sys", &[], &model);
-        // think=false must be at the top level of the request body, not inside options
-        assert_eq!(body["think"], false, "qwen models must have think=false at top level");
-        assert_eq!(body["options"]["num_predict"], 2048);
+        // qwen3-coder does not support thinking
+        assert!(body.get("think").is_none(), "qwen3-coder must not set think flag");
+    }
+
+    #[test]
+    fn strip_think_tags_basic() {
+        assert_eq!(strip_think_tags("<think>reasoning here</think>answer"), "answer");
+        assert_eq!(strip_think_tags("prefix<think>thinking</think>suffix"), "prefixsuffix");
+        assert_eq!(strip_think_tags("no think tags"), "no think tags");
+        assert_eq!(strip_think_tags("<think>unclosed"), "");
     }
 
     #[test]
