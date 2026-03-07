@@ -74,6 +74,8 @@ pub mod cost;
 pub mod error;
 pub mod executor;
 pub mod gateway;
+#[cfg(feature = "native")]
+pub mod harness;
 pub mod hook;
 pub mod lua;
 pub mod mcp;
@@ -81,6 +83,8 @@ pub mod memory;
 pub mod observation;
 pub mod permission;
 pub mod planner;
+#[cfg(feature = "native")]
+pub mod policy;
 pub mod provider;
 pub mod rlm;
 pub mod semantic_recursion;
